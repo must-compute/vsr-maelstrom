@@ -7,13 +7,18 @@ use std::{
 };
 
 use crate::{
-    event::{Command, Event, Query},
     log::Log,
     message::{Body, Message},
 };
 
 type NodeName = String;
 type ClientName = String;
+type NodeOrClientName = String;
+
+struct MessageWithResponder {
+    msg: Message,
+    responder: Option<tokio::sync::oneshot::Sender<Message>>,
+}
 
 // TODO can i use msg_id from Message, instead of request number?
 struct ClientTableEntry {
@@ -27,27 +32,10 @@ enum NodeStatus {
     Recovering,
 }
 
-pub async fn run() {
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(1000);
-    let node = Arc::new(Node {
-        event_tx,
-        op_log: Mutex::new(Log::new()), // TODO should the log start empty instead?
-        op_number: AtomicUsize::new(0),
-        commit_number: AtomicUsize::new(0), // TODO is this a good default?
-        view_number: AtomicUsize::new(0),
-        primary_node: Mutex::new("n0".to_string()), // TODO obtain via init call
-        status: Mutex::new(NodeStatus::Normal),
-        configuration: Default::default(),
-        replica_number: AtomicUsize::new(0),
-        client_table: Default::default(),
-    });
-
-    node.run(event_rx).await;
-}
-
-struct Node {
-    // channels. TODO init via lazy lock
-    pub event_tx: tokio::sync::mpsc::Sender<Event>,
+pub struct Node {
+    unacked: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message>>>,
+    stdout_tx: Mutex<Option<tokio::sync::mpsc::Sender<MessageWithResponder>>>,
+    next_msg_id: AtomicUsize,
 
     // vsr
     op_log: Mutex<Log>,
@@ -62,18 +50,40 @@ struct Node {
 }
 
 impl Node {
-    async fn run(self: Arc<Self>, event_rx: tokio::sync::mpsc::Receiver<Event>) {
+    pub fn new() -> Self {
+        Node {
+            unacked: Default::default(),
+            stdout_tx: Mutex::new(None),
+            next_msg_id: AtomicUsize::new(0),
+
+            op_log: Mutex::new(Log::new()), // TODO should the log start empty instead?
+            op_number: AtomicUsize::new(0),
+            commit_number: AtomicUsize::new(0), // TODO is this a good default?
+            view_number: AtomicUsize::new(0),
+            primary_node: Mutex::new("n0".to_string()), // TODO obtain via init call
+            status: Mutex::new(NodeStatus::Normal),
+            configuration: Default::default(),
+            replica_number: AtomicUsize::new(0),
+            client_table: Default::default(),
+        }
+    }
+
+    pub async fn run(self: Arc<Self>) {
         let mut stdin_rx = self.clone().spawn_stdin_task().await;
-        self.clone().spawn_event_handler_task(event_rx).await;
+        let stdout_tx = self.clone().spawn_stdout_task().await;
+        *self.stdout_tx.lock().unwrap() = Some(stdout_tx);
 
         loop {
             tokio::select! {
-                Some(json_msg) = stdin_rx.recv() => {
-                    tokio::spawn({
-                        // let self = self.clone();
-                        let node = self.clone();
-                        async move {node.handle(json_msg).await}
-                    });
+                Some(msg) = stdin_rx.recv() => {
+                    if let Some(responder) = self.unacked.lock().unwrap().remove(&msg.body.msg_id()) {
+                        responder.send(msg).unwrap();
+                    } else {
+                        tokio::spawn({
+                            let node = self.clone();
+                            async move {node.handle(msg).await}
+                        });
+                    }
                 }
             }
         }
@@ -82,7 +92,7 @@ impl Node {
     async fn handle(self: Arc<Self>, msg: Message) -> anyhow::Result<()> {
         match msg.body {
             Body::Init {
-                msg_id,
+                msg_id: in_reply_to,
                 node_id,
                 node_ids,
             } => {
@@ -100,73 +110,78 @@ impl Node {
                     self.replica_number.store(my_replica, Ordering::SeqCst);
                 }
 
-                // TODO send init_ok
+                let msg_id = self.reserve_next_msg_id();
+                self.send(
+                    msg.src,
+                    Body::InitOk {
+                        msg_id,
+                        in_reply_to,
+                    },
+                    None,
+                )
+                .await
             }
             _ => {
-                self.event_tx
-                    .send(Event::Cast(Command::ReceivedViaMaelstrom { response: msg }))
-                    .await?;
+                todo!()
             }
         };
         Ok(())
     }
 
-    async fn spawn_event_handler_task(
+    async fn send(
         self: Arc<Self>,
-        mut event_rx: tokio::sync::mpsc::Receiver<Event>,
+        dest: NodeOrClientName,
+        body: Body,
+        responder: Option<tokio::sync::oneshot::Sender<Message>>,
     ) {
+        let stdout_tx = self.stdout_tx.lock().unwrap().clone().unwrap();
+
+        let mut my_id = String::new();
+        {
+            let replica_number = self.replica_number.load(Ordering::SeqCst);
+            let configuration = self.configuration.lock().unwrap();
+            my_id = configuration.get(replica_number).unwrap().clone();
+        }
+
+        stdout_tx
+            .send(MessageWithResponder {
+                msg: Message {
+                    src: my_id,
+                    dest,
+                    body,
+                },
+                responder,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn spawn_stdout_task(self: Arc<Self>) -> tokio::sync::mpsc::Sender<MessageWithResponder> {
+        let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel::<MessageWithResponder>(32);
+
         tokio::spawn(async move {
-            let mut unacked: HashMap<usize, tokio::sync::oneshot::Sender<Message>> =
-                Default::default();
+            while let Some(MessageWithResponder { msg, responder }) = stdout_rx.recv().await {
+                println!(
+                    "{}",
+                    serde_json::to_string(&msg)
+                        .expect("msg being sent to STDOUT should be serializable to JSON")
+                );
+                tracing::debug!("sent msg {:?}", &msg);
 
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    Event::Call(Query::SendViaMaelstrom { ref message, .. })
-                    | Event::Cast(Command::SendViaMaelstrom { ref message }) => {
-                        let message = message.clone();
-                        println!(
-                            "{}",
-                            serde_json::to_string(&message)
-                                .expect("msg being sent to STDOUT should be serializable to JSON")
-                        );
-
-                        tracing::debug!("sent msg {:?}", &message);
-
-                        match event {
-                            Event::Call(Query::SendViaMaelstrom { responder, .. }) => {
-                                // TODO i dont like this at all, because     ^message
-                                //      will have an old msg id if captured, due to shadowing
-                                let msg_id = message.body.msg_id();
-                                unacked.insert(msg_id, responder);
-                                tracing::debug!("inserted to unacked with key: {msg_id}");
-                            }
-                            _ => (),
-                        };
-                    }
-                    Event::Cast(Command::ReceivedViaMaelstrom { response }) => {
-                        tracing::debug!(
-                            "handling Event::Cast(Command::ReceivedViaMaelstrom {:?}",
-                            &response
-                        );
-                        // we received an ack, so we notify and remove from unacked.
-                        if let Some(notifier) = unacked.remove(&response.body.in_reply_to()) {
-                            tracing::debug!(
-                                "popped unacked in_reply_to: {:?}",
-                                &response.body.in_reply_to()
-                            );
-                            notifier
-                                .send(response)
-                                .expect("returning msg ack should work over the oneshot channel");
-                        }
-                    }
+                if let Some(responder) = responder {
+                    self.unacked
+                        .lock()
+                        .unwrap()
+                        .insert(msg.body.msg_id(), responder);
                 }
             }
         });
+
+        stdout_tx
     }
 
     async fn spawn_stdin_task(self: Arc<Self>) -> tokio::sync::mpsc::Receiver<Message> {
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
-        // stdin task
         tokio::spawn(async move {
             let mut input = String::new();
             let mut is_reading_stdin = true;
@@ -179,10 +194,15 @@ impl Node {
                 let json_msg = serde_json::from_str(&input)
                     .expect(&format!("should take a JSON message. Got {:?}", input));
                 tracing::debug!("received json msg: {:?}", json_msg);
+
                 stdin_tx.send(json_msg).await.unwrap();
                 input.clear();
             }
         });
         stdin_rx
+    }
+
+    fn reserve_next_msg_id(&self) -> usize {
+        self.next_msg_id.fetch_add(1, Ordering::SeqCst)
     }
 }

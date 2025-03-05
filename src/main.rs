@@ -1,4 +1,7 @@
-mod event;
+use std::sync::Arc;
+
+use node::Node;
+
 mod log;
 mod message;
 mod node;
@@ -16,5 +19,6 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    node::run().await;
+    let node = Arc::new(Node::new());
+    node.run().await;
 }
