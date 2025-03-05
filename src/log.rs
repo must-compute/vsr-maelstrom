@@ -15,9 +15,7 @@ pub struct Log {
 
 impl Log {
     pub fn new() -> Self {
-        Self {
-            entries: vec![Entry { term: 0, op: None }],
-        }
+        Self { entries: vec![] }
     }
 
     pub fn get(&self, index: usize) -> Option<&Entry> {

@@ -20,7 +20,6 @@ struct MessageWithResponder {
     responder: Option<tokio::sync::oneshot::Sender<Message>>,
 }
 
-// TODO can i use msg_id from Message, instead of request number?
 struct ClientTableEntry {
     op: Message,
     response: Option<Message>, // None if still processing
@@ -56,9 +55,9 @@ impl Node {
             stdout_tx: Mutex::new(None),
             next_msg_id: AtomicUsize::new(0),
 
-            op_log: Mutex::new(Log::new()), // TODO should the log start empty instead?
+            op_log: Mutex::new(Log::new()),
             op_number: AtomicUsize::new(0),
-            commit_number: AtomicUsize::new(0), // TODO is this a good default?
+            commit_number: AtomicUsize::new(0),
             view_number: AtomicUsize::new(0),
             primary_node: Mutex::new("n0".to_string()), // TODO obtain via init call
             status: Mutex::new(NodeStatus::Normal),
