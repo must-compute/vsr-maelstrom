@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
 };
 
@@ -33,7 +33,7 @@ enum NodeStatus {
 
 pub struct Node {
     unacked: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message>>>,
-    stdout_tx: Mutex<Option<tokio::sync::mpsc::Sender<MessageWithResponder>>>,
+    stdout_tx: OnceLock<tokio::sync::mpsc::Sender<MessageWithResponder>>,
     next_msg_id: AtomicUsize,
 
     // vsr
@@ -52,7 +52,7 @@ impl Node {
     pub fn new() -> Self {
         Node {
             unacked: Default::default(),
-            stdout_tx: Mutex::new(None),
+            stdout_tx: OnceLock::new(),
             next_msg_id: AtomicUsize::new(0),
 
             op_log: Mutex::new(Log::new()),
@@ -69,8 +69,7 @@ impl Node {
 
     pub async fn run(self: Arc<Self>) {
         let mut stdin_rx = self.clone().spawn_stdin_task().await;
-        let stdout_tx = self.clone().spawn_stdout_task().await;
-        *self.stdout_tx.lock().unwrap() = Some(stdout_tx);
+        self.clone().spawn_stdout_task().await;
 
         loop {
             tokio::select! {
@@ -133,7 +132,7 @@ impl Node {
         body: Body,
         responder: Option<tokio::sync::oneshot::Sender<Message>>,
     ) {
-        let stdout_tx = self.stdout_tx.lock().unwrap().clone().unwrap();
+        let stdout_tx = self.stdout_tx.get().unwrap();
 
         let mut my_id = String::new();
         {
@@ -155,8 +154,10 @@ impl Node {
             .unwrap();
     }
 
-    async fn spawn_stdout_task(self: Arc<Self>) -> tokio::sync::mpsc::Sender<MessageWithResponder> {
+    async fn spawn_stdout_task(self: Arc<Self>) {
         let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel::<MessageWithResponder>(32);
+
+        self.stdout_tx.set(stdout_tx).unwrap();
 
         tokio::spawn(async move {
             while let Some(MessageWithResponder { msg, responder }) = stdout_rx.recv().await {
@@ -175,8 +176,6 @@ impl Node {
                 }
             }
         });
-
-        stdout_tx
     }
 
     async fn spawn_stdin_task(self: Arc<Self>) -> tokio::sync::mpsc::Receiver<Message> {
