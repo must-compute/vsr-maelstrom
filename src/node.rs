@@ -125,11 +125,53 @@ impl Node {
                 )
                 .await
             }
+            Body::Write { msg_id, .. } | Body::Read { msg_id, .. } | Body::Cas { msg_id, .. } => {
+                let mut response = None;
+                {
+                    let client_table_guard = self.client_table.lock().unwrap();
+                    response = client_table_guard.get(&msg.src).cloned();
+                }
+
+                match response {
+                    Some(ClientTableEntry {
+                        op,
+                        response: Some(cached_response),
+                    }) if msg == op => self.send(msg.src, cached_response.body, None).await,
+                    Some(ClientTableEntry { op, .. }) if msg.body.msg_id() < op.body.msg_id() => {
+                        let error_text =
+                            String::from("Normal Protocol: received a stale request number");
+                        self.send(
+                            msg.src,
+                            Body::Error {
+                                in_reply_to: msg.body.msg_id(),
+                                code: crate::message::ErrorCode::Abort,
+                                text: error_text,
+                            },
+                            None,
+                        )
+                        .await
+                    }
+                    // request is valid and is not cached in the client table
+                    _ => self.handle_client_request(msg).await,
+                }
+            }
             _ => {
                 todo!()
             }
         };
         Ok(())
+    }
+
+    async fn handle_client_request(self: Arc<Self>, msg: Message) {
+        // advance op-number
+        // add the request at the end of the log
+        // update the info for this client in the client table to contain the new request number s
+        // broadcast (Prepare v m n k) to other replicas.
+        //                    v: view number
+        //                    m: msg from client
+        //                    n: op number assigned to this request
+        //                    k: commit number
+        //
     }
 
     async fn send(
