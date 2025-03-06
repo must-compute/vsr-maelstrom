@@ -59,7 +59,7 @@ impl Node {
             op_number: AtomicUsize::new(0),
             commit_number: AtomicUsize::new(0),
             view_number: AtomicUsize::new(0),
-            primary_node: Mutex::new("n0".to_string()), // TODO obtain via init call
+            primary_node: Default::default(),
             status: Mutex::new(NodeStatus::Normal),
             configuration: Default::default(),
             replica_number: AtomicUsize::new(0),
@@ -100,12 +100,17 @@ impl Node {
                         configuration_guard.push(node_id);
                     }
 
+                    // all nodes must use the same order (view change happens round-robin)
+                    configuration_guard.sort();
+
                     let my_replica = configuration_guard
                         .iter()
                         .position(|node_name| *node_name == node_id)
                         .unwrap();
 
                     self.replica_number.store(my_replica, Ordering::SeqCst);
+                    *self.primary_node.lock().unwrap() =
+                        configuration_guard.first().unwrap().clone();
                 }
 
                 let msg_id = self.reserve_next_msg_id();
