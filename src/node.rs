@@ -20,6 +20,7 @@ struct MessageWithResponder {
     responder: Option<tokio::sync::oneshot::Sender<Message>>,
 }
 
+#[derive(Debug, Clone)]
 struct ClientTableEntry {
     op: Message,
     response: Option<Message>, // None if still processing
