@@ -48,6 +48,13 @@ pub enum Body {
         msg_id: usize,
         in_reply_to: usize,
     },
+    Prepare {
+        msg_id: usize,
+        view_number: usize,
+        op: Box<Message>,
+        op_number: usize,
+        commit_number: usize,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -65,7 +72,8 @@ impl Body {
             | Body::Write { msg_id, .. }
             | Body::WriteOk { msg_id, .. }
             | Body::Cas { msg_id, .. }
-            | Body::CasOk { msg_id, .. } => *msg_id,
+            | Body::CasOk { msg_id, .. }
+            | Body::Prepare { msg_id, .. } => *msg_id,
             Body::Error { .. } => panic!("error msgs have no msg id"),
         }
     }
@@ -78,7 +86,8 @@ impl Body {
             | Body::Write { ref mut msg_id, .. }
             | Body::WriteOk { ref mut msg_id, .. }
             | Body::Cas { ref mut msg_id, .. }
-            | Body::CasOk { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            | Body::CasOk { ref mut msg_id, .. }
+            | Body::Prepare { ref mut msg_id, .. } => *msg_id = new_msg_id,
             Body::Error { .. } => panic!("error msgs have no msg id"),
         }
     }
@@ -92,7 +101,8 @@ impl Body {
             | Body::InitOk { .. }
             | Body::Read { .. }
             | Body::Write { .. }
-            | Body::Cas { .. } => panic!("in_reply_to not supported for {:?}", self),
+            | Body::Cas { .. }
+            | Body::Prepare { .. } => panic!("in_reply_to not supported for {:?}", self),
         }
     }
     pub fn set_in_reply_to(&mut self, new_in_reply_to: usize) {
@@ -120,7 +130,11 @@ impl Body {
                 *in_reply_to = new_in_reply_to;
             }
 
-            Body::Init { .. } | Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
+            Body::Init { .. }
+            | Body::Read { .. }
+            | Body::Write { .. }
+            | Body::Cas { .. }
+            | Body::Prepare { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
         }
