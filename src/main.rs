@@ -4,6 +4,7 @@ use node::Node;
 
 mod message;
 mod node;
+mod node2;
 
 #[tokio::main]
 async fn main() {
