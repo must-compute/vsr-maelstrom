@@ -171,6 +171,56 @@ impl Node {
         //
     }
 
+    async fn broadcast(
+        self: Arc<Self>,
+        body: Body,
+        responder: Option<tokio::sync::mpsc::Sender<Message>>,
+    ) {
+        let mut receiver_tasks = tokio::task::JoinSet::<Message>::new();
+
+        let mut other_node_ids = vec![];
+        {
+            let configuration_guard = self.configuration.lock().unwrap();
+
+            let my_id = configuration_guard
+                .get(self.replica_number.load(Ordering::SeqCst))
+                .unwrap();
+
+            other_node_ids = configuration_guard
+                .iter()
+                .filter(|id| *id != my_id)
+                .cloned()
+                .collect();
+        }
+
+        for destination in other_node_ids {
+            let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+            receiver_tasks.spawn(async move {
+                rx.await
+                    .expect("should be able to recv on one of the broadcast responses")
+            });
+
+            let new_msg_id = self.clone().reserve_next_msg_id();
+
+            let mut body = body.clone();
+            body.set_msg_id(new_msg_id);
+            self.clone().send(destination, body, Some(tx)).await;
+        }
+
+        tokio::spawn(async move {
+            while let Some(response_result) = receiver_tasks.join_next().await {
+                let response_message =
+                    response_result.expect("should be able to recv response during broadcast");
+                if let Some(ref responder) = responder {
+                    responder
+                        .send(response_message)
+                        .await
+                        .expect("should be able to return response message from broadcast()");
+                }
+            }
+        });
+    }
+
     async fn send(
         self: Arc<Self>,
         dest: NodeOrClientName,
