@@ -6,10 +6,7 @@ use std::{
     },
 };
 
-use crate::{
-    log::Log,
-    message::{Body, Message},
-};
+use crate::message::{Body, Message};
 
 type NodeName = String;
 type ClientName = String;
@@ -38,7 +35,7 @@ pub struct Node {
     next_msg_id: AtomicUsize,
 
     // vsr
-    op_log: Mutex<Log>,
+    op_log: Mutex<Vec<Message>>,
     op_number: AtomicUsize,
     commit_number: AtomicUsize,
     view_number: AtomicUsize,
@@ -56,7 +53,7 @@ impl Node {
             stdout_tx: OnceLock::new(),
             next_msg_id: AtomicUsize::new(0),
 
-            op_log: Mutex::new(Log::new()),
+            op_log: Mutex::new(Vec::new()),
             op_number: AtomicUsize::new(0),
             commit_number: AtomicUsize::new(0),
             view_number: AtomicUsize::new(0),

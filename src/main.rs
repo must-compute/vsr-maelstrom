@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use node::Node;
 
-mod log;
 mod message;
 mod node;
 
