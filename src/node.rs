@@ -151,13 +151,45 @@ impl Node {
 
     async fn handle_client_request(self: Arc<Self>, msg: Message) {
         // advance op-number
+        self.op_number.fetch_add(1, Ordering::SeqCst);
         // add the request at the end of the log
+        self.op_log.lock().unwrap().push(msg.clone());
         // update the info for this client in the client table to contain the new request number s
+        self.client_table.lock().unwrap().insert(
+            msg.src.clone(),
+            ClientTableEntry {
+                op: msg.clone(),
+                response: None,
+            },
+        );
         // broadcast (Prepare v m n k) to other replicas.
         //                    v: view number
         //                    m: msg from client
         //                    n: op number assigned to this request
         //                    k: commit number
-        //
+        let replica_count = self.configuration.lock().unwrap().len() - 1;
+        let body = Body::Prepare {
+            msg_id: 0, // will be filled by broadcast()
+            view_number: self.view_number.load(Ordering::SeqCst),
+            op: Box::new(msg.clone()),
+            op_number: self.op_number.load(Ordering::SeqCst),
+            commit_number: self.commit_number.load(Ordering::SeqCst),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(replica_count);
+        self.broadcast(body, Some(tx)).await;
+
+        let mut remaining_response_count = replica_count;
+        while let Some(response) = rx.recv().await {
+            tracing::debug!("remaining_response_count: {remaining_response_count}");
+            match response.body {
+                Body::PrepareOk { .. } => {
+                    todo!()
+                }
+                _ => panic!(
+                    "expected a PrepareOk response to Prepare broadcast msg. Got: {:?}",
+                    response
+                ),
+            }
+        }
     }
 }

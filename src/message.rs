@@ -55,6 +55,12 @@ pub enum Body {
         op_number: usize,
         commit_number: usize,
     },
+    PrepareOk {
+        msg_id: usize,
+        in_reply_to: usize,
+        view_numer: usize,
+        op_number: usize,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -73,7 +79,8 @@ impl Body {
             | Body::WriteOk { msg_id, .. }
             | Body::Cas { msg_id, .. }
             | Body::CasOk { msg_id, .. }
-            | Body::Prepare { msg_id, .. } => *msg_id,
+            | Body::Prepare { msg_id, .. }
+            | Body::PrepareOk { msg_id, .. } => *msg_id,
             Body::Error { .. } => panic!("error msgs have no msg id"),
         }
     }
@@ -87,7 +94,8 @@ impl Body {
             | Body::WriteOk { ref mut msg_id, .. }
             | Body::Cas { ref mut msg_id, .. }
             | Body::CasOk { ref mut msg_id, .. }
-            | Body::Prepare { ref mut msg_id, .. } => *msg_id = new_msg_id,
+            | Body::Prepare { ref mut msg_id, .. }
+            | Body::PrepareOk { ref mut msg_id, .. } => *msg_id = new_msg_id,
             Body::Error { .. } => panic!("error msgs have no msg id"),
         }
     }
@@ -96,6 +104,7 @@ impl Body {
             Body::ReadOk { in_reply_to, .. }
             | Body::WriteOk { in_reply_to, .. }
             | Body::CasOk { in_reply_to, .. }
+            | Body::PrepareOk { in_reply_to, .. }
             | Body::Error { in_reply_to, .. } => *in_reply_to,
             Body::Init { .. }
             | Body::InitOk { .. }
@@ -120,6 +129,10 @@ impl Body {
                 ..
             }
             | Body::CasOk {
+                ref mut in_reply_to,
+                ..
+            }
+            | Body::PrepareOk {
                 ref mut in_reply_to,
                 ..
             }
