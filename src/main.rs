@@ -1,9 +1,9 @@
-use std::sync::Arc;
-
-use node::Node;
-
 mod message;
 mod node;
+mod vsr;
+
+use std::sync::Arc;
+use vsr::VSR;
 
 #[tokio::main]
 async fn main() {
@@ -18,6 +18,6 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let node = Arc::new(Node::new());
+    let node = Arc::new(VSR::new());
     node.run().await;
 }
