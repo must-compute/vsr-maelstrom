@@ -176,7 +176,7 @@ impl Node {
             commit_number: self.commit_number.load(Ordering::SeqCst),
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(replica_count);
-        self.broadcast(body, Some(tx)).await;
+        self.node2.clone().broadcast(body, Some(tx)).await;
 
         let mut remaining_response_count = replica_count;
         while let Some(response) = rx.recv().await {
