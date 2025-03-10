@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use crate::message::{Body, Message};
+use crate::message::{Body, BodyWithMsgId, Message};
 
 type NodeOrClientName = String;
 
@@ -47,7 +47,10 @@ impl Node {
                 msg: Message {
                     src: self.my_id.get().unwrap().into(),
                     dest,
-                    body,
+                    body: BodyWithMsgId {
+                        msg_id: self.reserve_next_msg_id(),
+                        inner: body,
+                    },
                 },
                 responder,
             })
@@ -72,7 +75,6 @@ impl Node {
             let new_msg_id = self.clone().reserve_next_msg_id();
 
             let mut body = body.clone();
-            body.set_msg_id(new_msg_id);
             self.clone().send(destination, body, Some(tx)).await;
         }
 
@@ -101,7 +103,7 @@ impl Node {
                 let mut responder: Option<tokio::sync::oneshot::Sender<Message>> = None;
                 {
                     let mut unacked = self.unacked.lock().unwrap();
-                    responder = unacked.remove(&msg.body.msg_id());
+                    responder = unacked.remove(&msg.body.msg_id);
                 }
 
                 if let Some(responder) = responder {
@@ -133,7 +135,7 @@ impl Node {
                     self.unacked
                         .lock()
                         .unwrap()
-                        .insert(msg.body.msg_id(), responder);
+                        .insert(msg.body.msg_id, responder);
                 }
             }
         });
@@ -156,7 +158,7 @@ impl Node {
 
                 if let Body::Init {
                     node_id, node_ids, ..
-                } = &json_msg.body
+                } = &json_msg.body.inner
                 {
                     self.my_id.set(node_id.into());
 
@@ -176,7 +178,7 @@ impl Node {
         stdin_rx
     }
 
-    pub fn reserve_next_msg_id(&self) -> usize {
+    fn reserve_next_msg_id(&self) -> usize {
         self.next_msg_id.fetch_add(1, Ordering::SeqCst)
     }
 }
