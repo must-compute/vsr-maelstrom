@@ -17,8 +17,9 @@ type ClientName = String;
 
 #[derive(Debug, Clone)]
 struct ClientTableEntry {
-    op: Message,
-    response: Option<Message>, // None if still processing
+    //msg_id of a client request
+    request_number: usize,
+    response_body: Option<Body>, // None if still processing
 }
 
 enum NodeStatus {
@@ -130,16 +131,18 @@ impl VSR {
 
                 match response {
                     Some(ClientTableEntry {
-                        op,
-                        response: Some(cached_response),
-                    }) if msg == op => {
+                        request_number,
+                        response_body: Some(cached_response_body),
+                    }) if msg.body.msg_id == request_number => {
                         let _ = self
                             .node
                             .clone()
-                            .send(msg.src, cached_response.body.inner, None)
+                            .send(msg.src, cached_response_body, None)
                             .await;
                     }
-                    Some(ClientTableEntry { op, .. }) if msg.body.msg_id < op.body.msg_id => {
+                    Some(ClientTableEntry { request_number, .. })
+                        if msg.body.msg_id < request_number =>
+                    {
                         let error_text =
                             String::from("Normal Protocol: received a stale request number");
                         let _ = self
@@ -160,6 +163,31 @@ impl VSR {
                     _ => self.handle_client_request(msg).await,
                 }
             }
+            Body::Prepare { op, .. } => {
+                //TODO check if we need to catch up on previous ops
+                self.op_number.fetch_add(1, Ordering::SeqCst);
+                self.op_log.lock().unwrap().push(*op.clone());
+                let response_body = self.clone().apply_to_state_machine(&op).await;
+                self.client_table.lock().unwrap().insert(
+                    op.src,
+                    ClientTableEntry {
+                        request_number: msg.body.msg_id,
+                        response_body: Some(response_body.clone()),
+                    },
+                );
+                self.node
+                    .clone()
+                    .send(
+                        msg.src,
+                        Body::PrepareOk {
+                            in_reply_to: msg.body.msg_id,
+                            view_numer: self.view_number.load(Ordering::SeqCst),
+                            op_number: self.op_number.load(Ordering::SeqCst),
+                        },
+                        None,
+                    )
+                    .await;
+            }
             _ => {
                 todo!()
             }
@@ -176,8 +204,8 @@ impl VSR {
         self.client_table.lock().unwrap().insert(
             msg.src.clone(),
             ClientTableEntry {
-                op: msg.clone(),
-                response: None,
+                request_number: msg.body.msg_id,
+                response_body: None,
             },
         );
         // broadcast (Prepare v m n k) to other replicas.
@@ -221,13 +249,28 @@ impl VSR {
 
         self.commit_number.fetch_add(1, Ordering::SeqCst);
 
-        let mut my_response: Option<Message> = None;
+        let response_body = self.clone().apply_to_state_machine(&msg).await;
 
+        self.client_table.lock().unwrap().insert(
+            msg.src.clone(),
+            ClientTableEntry {
+                request_number: msg.body.msg_id,
+                response_body: Some(response_body.clone()),
+            },
+        );
+
+        self.node
+            .clone()
+            .send(msg.src.clone(), response_body, None)
+            .await;
+    }
+
+    async fn apply_to_state_machine(self: Arc<Self>, msg: &Message) -> Body {
         match msg.body.inner {
             Body::Read { key } => {
                 let result = self.state_machine.lock().unwrap().read(&key).cloned();
 
-                let body = match result {
+                match result {
                     Some(value) => Body::ReadOk {
                         in_reply_to: msg.body.msg_id,
                         value,
@@ -240,24 +283,13 @@ impl VSR {
                             text: err.to_string(),
                         }
                     }
-                };
-
-                my_response = Some(self.node.clone().send(msg.src.clone(), body, None).await);
+                }
             }
             Body::Write { key, value } => {
                 self.clone().state_machine.lock().unwrap().write(key, value);
-                my_response = Some(
-                    self.node
-                        .clone()
-                        .send(
-                            msg.src.clone(),
-                            Body::WriteOk {
-                                in_reply_to: msg.body.msg_id,
-                            },
-                            None,
-                        )
-                        .await,
-                );
+                Body::WriteOk {
+                    in_reply_to: msg.body.msg_id,
+                }
             }
             Body::Cas { key, from, to } => {
                 let result = self
@@ -267,7 +299,7 @@ impl VSR {
                     .unwrap()
                     .cas(key, from, to);
 
-                let body = match result {
+                match result {
                     Ok(()) => Body::CasOk {
                         in_reply_to: msg.body.msg_id,
                     },
@@ -280,20 +312,10 @@ impl VSR {
                         },
                         _ => panic!("encountered an unexpected error while processing Cas request"),
                     },
-                };
-
-                my_response = Some(self.node.clone().send(msg.src.clone(), body, None).await);
+                }
             }
             _ => unreachable!(),
         }
-
-        self.client_table.lock().unwrap().insert(
-            msg.src.clone(),
-            ClientTableEntry {
-                op: msg,
-                response: my_response,
-            },
-        );
     }
 
     fn majority_count(self: Arc<Self>) -> usize {
