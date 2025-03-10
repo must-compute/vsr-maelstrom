@@ -123,6 +123,18 @@ impl VSR {
                     .await;
             }
             Body::Write { .. } | Body::Read { .. } | Body::Cas { .. } => {
+                let my_id = self.node.my_id.get();
+                if *self.clone().primary_node.lock().unwrap() != *my_id.unwrap() {
+                    let error_body = Body::Error {
+                        in_reply_to: msg.body.msg_id,
+                        code: ErrorCode::Abort,
+                        text: String::from("I AM NOT THE PRIMARY!"),
+                    };
+
+                    self.node.clone().send(msg.src, error_body, None).await;
+                    return Ok(());
+                }
+
                 let mut response = None;
                 {
                     let client_table_guard = self.client_table.lock().unwrap();
