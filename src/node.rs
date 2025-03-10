@@ -72,10 +72,7 @@ impl Node {
                     .expect("should be able to recv on one of the broadcast responses")
             });
 
-            let new_msg_id = self.clone().reserve_next_msg_id();
-
-            let mut body = body.clone();
-            self.clone().send(destination, body, Some(tx)).await;
+            self.clone().send(destination, body.clone(), Some(tx)).await;
         }
 
         tokio::spawn(async move {
