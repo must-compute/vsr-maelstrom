@@ -66,12 +66,8 @@ impl VSR {
     }
 
     async fn handle(self: Arc<Self>, msg: Message) -> anyhow::Result<()> {
-        match msg.body {
-            Body::Init {
-                msg_id: in_reply_to,
-                node_id,
-                node_ids,
-            } => {
+        match msg.body.inner {
+            Body::Init { node_id, node_ids } => {
                 {
                     let mut configuration_guard = self.configuration.lock().unwrap();
                     for node_id in node_ids {
@@ -91,20 +87,18 @@ impl VSR {
                         configuration_guard.first().unwrap().clone();
                 }
 
-                let msg_id = self.node.reserve_next_msg_id();
                 self.node
                     .clone()
                     .send(
                         msg.src,
                         Body::InitOk {
-                            msg_id,
-                            in_reply_to,
+                            in_reply_to: msg.body.msg_id,
                         },
                         None,
                     )
                     .await
             }
-            Body::Write { msg_id, .. } | Body::Read { msg_id, .. } | Body::Cas { msg_id, .. } => {
+            Body::Write { .. } | Body::Read { .. } | Body::Cas { .. } => {
                 let mut response = None;
                 {
                     let client_table_guard = self.client_table.lock().unwrap();
@@ -118,10 +112,10 @@ impl VSR {
                     }) if msg == op => {
                         self.node
                             .clone()
-                            .send(msg.src, cached_response.body, None)
+                            .send(msg.src, cached_response.body.inner, None)
                             .await
                     }
-                    Some(ClientTableEntry { op, .. }) if msg.body.msg_id() < op.body.msg_id() => {
+                    Some(ClientTableEntry { op, .. }) if msg.body.msg_id < op.body.msg_id => {
                         let error_text =
                             String::from("Normal Protocol: received a stale request number");
                         self.node
@@ -129,7 +123,7 @@ impl VSR {
                             .send(
                                 msg.src,
                                 Body::Error {
-                                    in_reply_to: msg.body.msg_id(),
+                                    in_reply_to: msg.body.msg_id,
                                     code: crate::message::ErrorCode::Abort,
                                     text: error_text,
                                 },
@@ -168,7 +162,6 @@ impl VSR {
         //                    k: commit number
         let replica_count = self.configuration.lock().unwrap().len() - 1;
         let body = Body::Prepare {
-            msg_id: 0, // will be filled by broadcast()
             view_number: self.view_number.load(Ordering::SeqCst),
             op: Box::new(msg.clone()),
             op_number: self.op_number.load(Ordering::SeqCst),
@@ -180,7 +173,7 @@ impl VSR {
         let mut remaining_response_count = replica_count;
         while let Some(response) = rx.recv().await {
             tracing::debug!("remaining_response_count: {remaining_response_count}");
-            match response.body {
+            match response.body.inner {
                 Body::PrepareOk { .. } => {
                     todo!()
                 }

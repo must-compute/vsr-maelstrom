@@ -5,58 +5,56 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 pub struct Message {
     pub src: String,
     pub dest: String,
-    pub body: Body,
+    pub body: BodyWithMsgId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct BodyWithMsgId {
+    pub msg_id: usize,
+    #[serde(flatten)]
+    pub inner: Body,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Body {
     Init {
-        msg_id: usize,
         node_id: String,
         node_ids: Vec<String>,
     },
     InitOk {
-        msg_id: usize,
         in_reply_to: usize,
     },
     Read {
-        msg_id: usize,
         key: usize, // technically it should be Any
     },
     ReadOk {
-        msg_id: usize,
         in_reply_to: usize,
         value: serde_json::Value,
     },
     Write {
-        msg_id: usize,
         key: usize, // technically it should be Any
         value: serde_json::Value,
     },
     WriteOk {
-        msg_id: usize,
         in_reply_to: usize,
     },
     Cas {
-        msg_id: usize,
         key: usize, // technically it should be Any
         from: serde_json::Value,
         to: serde_json::Value,
     },
     CasOk {
-        msg_id: usize,
         in_reply_to: usize,
     },
     Prepare {
-        msg_id: usize,
         view_number: usize,
         op: Box<Message>,
         op_number: usize,
         commit_number: usize,
     },
     PrepareOk {
-        msg_id: usize,
         in_reply_to: usize,
         view_numer: usize,
         op_number: usize,
@@ -69,36 +67,6 @@ pub enum Body {
 }
 
 impl Body {
-    pub fn msg_id(&self) -> usize {
-        match self {
-            Body::Init { msg_id, .. }
-            | Body::InitOk { msg_id, .. }
-            | Body::Read { msg_id, .. }
-            | Body::ReadOk { msg_id, .. }
-            | Body::Write { msg_id, .. }
-            | Body::WriteOk { msg_id, .. }
-            | Body::Cas { msg_id, .. }
-            | Body::CasOk { msg_id, .. }
-            | Body::Prepare { msg_id, .. }
-            | Body::PrepareOk { msg_id, .. } => *msg_id,
-            Body::Error { .. } => panic!("error msgs have no msg id"),
-        }
-    }
-    pub fn set_msg_id(&mut self, new_msg_id: usize) {
-        match self {
-            Body::Init { ref mut msg_id, .. }
-            | Body::InitOk { ref mut msg_id, .. }
-            | Body::Read { ref mut msg_id, .. }
-            | Body::ReadOk { ref mut msg_id, .. }
-            | Body::Write { ref mut msg_id, .. }
-            | Body::WriteOk { ref mut msg_id, .. }
-            | Body::Cas { ref mut msg_id, .. }
-            | Body::CasOk { ref mut msg_id, .. }
-            | Body::Prepare { ref mut msg_id, .. }
-            | Body::PrepareOk { ref mut msg_id, .. } => *msg_id = new_msg_id,
-            Body::Error { .. } => panic!("error msgs have no msg id"),
-        }
-    }
     pub fn in_reply_to(&self) -> usize {
         match self {
             Body::ReadOk { in_reply_to, .. }
