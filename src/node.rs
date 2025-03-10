@@ -10,7 +10,7 @@ use crate::message::{Body, Message};
 
 type NodeOrClientName = String;
 
-struct MessageWithResponder {
+pub struct MessageWithResponder {
     msg: Message,
     responder: Option<tokio::sync::oneshot::Sender<Message>>,
 }
