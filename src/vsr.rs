@@ -69,9 +69,9 @@ impl VSR {
             tokio::select! {
                 Some(msg) = stdin_rx.recv() => {
                     let mut responder: Option<tokio::sync::oneshot::Sender<Message>> = None;
-                    {
+                    if let Some(in_reply_to) = msg.body.inner.in_reply_to() {
                         let mut unacked = self.node.unacked.lock().unwrap();
-                        responder = unacked.remove(&msg.body.msg_id);
+                        responder = unacked.remove(&in_reply_to);
                     }
 
                     if let Some(responder) = responder {

@@ -67,19 +67,19 @@ pub enum Body {
 }
 
 impl Body {
-    pub fn in_reply_to(&self) -> usize {
+    pub fn in_reply_to(&self) -> Option<usize> {
         match self {
             Body::ReadOk { in_reply_to, .. }
             | Body::WriteOk { in_reply_to, .. }
             | Body::CasOk { in_reply_to, .. }
             | Body::PrepareOk { in_reply_to, .. }
-            | Body::Error { in_reply_to, .. } => *in_reply_to,
+            | Body::Error { in_reply_to, .. } => Some(*in_reply_to),
             Body::Init { .. }
             | Body::InitOk { .. }
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
-            | Body::Prepare { .. } => panic!("in_reply_to not supported for {:?}", self),
+            | Body::Prepare { .. } => None,
         }
     }
     pub fn set_in_reply_to(&mut self, new_in_reply_to: usize) {
