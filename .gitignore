@@ -13,3 +13,5 @@ devenv.local.nix
 .pre-commit-config.yaml
 
 .vscode
+
+.DS_Store

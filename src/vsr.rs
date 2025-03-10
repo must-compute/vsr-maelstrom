@@ -7,7 +7,8 @@ use std::{
 };
 
 use crate::{
-    message::{Body, Message},
+    kv_store::KeyValueStore,
+    message::{Body, ErrorCode, Message},
     node::Node,
 };
 
@@ -26,6 +27,9 @@ enum NodeStatus {
     Recovering,
 }
 
+pub type StateMachineKey = usize;
+pub type StateMachineValue = usize;
+
 pub struct VSR {
     op_log: Mutex<Vec<Message>>,
     op_number: AtomicUsize,
@@ -37,6 +41,7 @@ pub struct VSR {
     replica_number: AtomicUsize,
     client_table: Mutex<HashMap<ClientName, ClientTableEntry>>,
     node: Arc<Node>,
+    state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>,
 }
 
 impl VSR {
@@ -52,6 +57,7 @@ impl VSR {
             replica_number: AtomicUsize::new(0),
             client_table: Default::default(),
             node: Arc::new(Node::new()),
+            state_machine: Default::default(),
         }
     }
 
@@ -87,7 +93,8 @@ impl VSR {
                         configuration_guard.first().unwrap().clone();
                 }
 
-                self.node
+                let _ = self
+                    .node
                     .clone()
                     .send(
                         msg.src,
@@ -96,7 +103,7 @@ impl VSR {
                         },
                         None,
                     )
-                    .await
+                    .await;
             }
             Body::Write { .. } | Body::Read { .. } | Body::Cas { .. } => {
                 let mut response = None;
@@ -110,15 +117,17 @@ impl VSR {
                         op,
                         response: Some(cached_response),
                     }) if msg == op => {
-                        self.node
+                        let _ = self
+                            .node
                             .clone()
                             .send(msg.src, cached_response.body.inner, None)
-                            .await
+                            .await;
                     }
                     Some(ClientTableEntry { op, .. }) if msg.body.msg_id < op.body.msg_id => {
                         let error_text =
                             String::from("Normal Protocol: received a stale request number");
-                        self.node
+                        let _ = self
+                            .node
                             .clone()
                             .send(
                                 msg.src,
@@ -129,7 +138,7 @@ impl VSR {
                                 },
                                 None,
                             )
-                            .await
+                            .await;
                     }
                     // request is valid and is not cached in the client table
                     _ => self.handle_client_request(msg).await,
@@ -170,12 +179,22 @@ impl VSR {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(replica_count);
         self.node.clone().broadcast(body, Some(tx)).await;
 
-        let mut remaining_response_count = replica_count;
+        // We count ourselves as part of the consensus majority
+        let mut remaining_response_count = self.clone().majority_count() - 1;
+
         while let Some(response) = rx.recv().await {
             tracing::debug!("remaining_response_count: {remaining_response_count}");
             match response.body.inner {
                 Body::PrepareOk { .. } => {
-                    todo!()
+                    remaining_response_count -= 1;
+
+                    // TODO - check if this is needed ( step 5, normal operation )
+                    // Then, after it has executed all earlier operations
+                    // (those assigned smaller op-numbers)
+
+                    if remaining_response_count == 0 {
+                        break;
+                    }
                 }
                 _ => panic!(
                     "expected a PrepareOk response to Prepare broadcast msg. Got: {:?}",
@@ -183,5 +202,86 @@ impl VSR {
                 ),
             }
         }
+
+        self.commit_number.fetch_add(1, Ordering::SeqCst);
+
+        let mut my_response: Option<Message> = None;
+
+        match msg.body.inner {
+            Body::Read { key } => {
+                let result = self.state_machine.lock().unwrap().read(&key).cloned();
+
+                let body = match result {
+                    Some(value) => Body::ReadOk {
+                        in_reply_to: msg.body.msg_id,
+                        value,
+                    },
+                    None => {
+                        let err = ErrorCode::KeyDoesNotExist;
+                        Body::Error {
+                            in_reply_to: msg.body.msg_id,
+                            code: err.clone(),
+                            text: err.to_string(),
+                        }
+                    }
+                };
+
+                my_response = Some(self.node.clone().send(msg.src.clone(), body, None).await);
+            }
+            Body::Write { key, value } => {
+                self.clone().state_machine.lock().unwrap().write(key, value);
+                my_response = Some(
+                    self.node
+                        .clone()
+                        .send(
+                            msg.src.clone(),
+                            Body::WriteOk {
+                                in_reply_to: msg.body.msg_id,
+                            },
+                            None,
+                        )
+                        .await,
+                );
+            }
+            Body::Cas { key, from, to } => {
+                let result = self
+                    .clone()
+                    .state_machine
+                    .lock()
+                    .unwrap()
+                    .cas(key, from, to);
+
+                let body = match result {
+                    Ok(()) => Body::CasOk {
+                        in_reply_to: msg.body.msg_id,
+                    },
+                    Err(e) => match e.downcast_ref::<ErrorCode>() {
+                        Some(e @ ErrorCode::PreconditionFailed)
+                        | Some(e @ ErrorCode::KeyDoesNotExist) => Body::Error {
+                            in_reply_to: msg.body.msg_id,
+                            code: e.clone(),
+                            text: e.to_string(),
+                        },
+                        _ => panic!("encountered an unexpected error while processing Cas request"),
+                    },
+                };
+
+                my_response = Some(self.node.clone().send(msg.src.clone(), body, None).await);
+            }
+            _ => unreachable!(),
+        }
+
+        self.client_table.lock().unwrap().insert(
+            msg.src.clone(),
+            ClientTableEntry {
+                op: msg,
+                response: my_response,
+            },
+        );
+    }
+
+    fn majority_count(self: Arc<Self>) -> usize {
+        let all_nodes_count = self.node.other_node_ids.get().unwrap().len() + 1;
+        (all_nodes_count / 2) + 1
     }
 }

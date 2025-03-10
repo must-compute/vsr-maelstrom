@@ -39,23 +39,26 @@ impl Node {
         dest: NodeOrClientName,
         body: Body,
         responder: Option<tokio::sync::oneshot::Sender<Message>>,
-    ) {
+    ) -> Message {
         let stdout_tx = self.stdout_tx.get().unwrap();
+
+        let msg = Message {
+            src: self.my_id.get().unwrap().into(),
+            dest,
+            body: BodyWithMsgId {
+                msg_id: self.reserve_next_msg_id(),
+                inner: body,
+            },
+        };
 
         stdout_tx
             .send(MessageWithResponder {
-                msg: Message {
-                    src: self.my_id.get().unwrap().into(),
-                    dest,
-                    body: BodyWithMsgId {
-                        msg_id: self.reserve_next_msg_id(),
-                        inner: body,
-                    },
-                },
+                msg: msg.clone(),
                 responder,
             })
             .await
             .unwrap();
+        msg
     }
 
     pub async fn broadcast(

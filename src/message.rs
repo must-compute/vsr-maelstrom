@@ -31,19 +31,19 @@ pub enum Body {
     },
     ReadOk {
         in_reply_to: usize,
-        value: serde_json::Value,
+        value: usize,
     },
     Write {
         key: usize, // technically it should be Any
-        value: serde_json::Value,
+        value: usize,
     },
     WriteOk {
         in_reply_to: usize,
     },
     Cas {
         key: usize, // technically it should be Any
-        from: serde_json::Value,
-        to: serde_json::Value,
+        from: usize,
+        to: usize,
     },
     CasOk {
         in_reply_to: usize,

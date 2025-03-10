@@ -1,3 +1,4 @@
+mod kv_store;
 mod message;
 mod node;
 mod vsr;
