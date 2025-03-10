@@ -62,12 +62,28 @@ impl VSR {
     }
 
     pub async fn run(self: Arc<Self>) {
-        let mut rx = self.node.clone().run().await;
-        while let Some(msg) = rx.recv().await {
-            tokio::spawn({
-                let node = self.clone();
-                async move { node.handle(msg).await }
-            });
+        let mut stdin_rx = self.node.clone().spawn_stdin_task().await;
+        self.node.clone().spawn_stdout_task().await;
+
+        loop {
+            tokio::select! {
+                Some(msg) = stdin_rx.recv() => {
+                    let mut responder: Option<tokio::sync::oneshot::Sender<Message>> = None;
+                    {
+                        let mut unacked = self.node.unacked.lock().unwrap();
+                        responder = unacked.remove(&msg.body.msg_id);
+                    }
+
+                    if let Some(responder) = responder {
+                        responder.send(msg).unwrap();
+                    } else {
+                        tokio::spawn({
+                            let vsr = self.clone();
+                            async move { vsr.handle(msg).await }
+                        });
+                    }
+                }
+            };
         }
     }
 
