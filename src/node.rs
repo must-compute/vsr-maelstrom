@@ -83,10 +83,13 @@ impl Node {
                 let response_message =
                     response_result.expect("should be able to recv response during broadcast");
                 if let Some(ref responder) = responder {
-                    responder
-                        .send(response_message)
-                        .await
-                        .expect("should be able to return response message from broadcast()");
+                    // The caller of broadcast might not care for all responses.
+                    // In such case, some receivers might be dropped already
+                    if !responder.is_closed() {
+                        // There is still chance for a receiver to be dropped
+                        // after the is_closed() check, so ignore the result
+                        let _ = responder.send(response_message).await;
+                    }
                 }
             }
         });
