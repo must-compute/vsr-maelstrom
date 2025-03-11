@@ -6,6 +6,8 @@ use std::{
     },
 };
 
+use tokio::task::yield_now;
+
 use crate::message::{Body, BodyWithMsgId, Message};
 
 type NodeOrClientName = String;
@@ -18,7 +20,7 @@ pub struct MessageWithResponder {
 pub struct Node {
     pub my_id: OnceLock<String>,
     pub other_node_ids: OnceLock<Vec<String>>,
-    pub unacked: Arc<Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message>>>>,
+    unacked: Arc<Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message>>>>,
     pub stdout_tx: OnceLock<tokio::sync::mpsc::Sender<MessageWithResponder>>,
     pub next_msg_id: AtomicUsize,
 }
@@ -104,9 +106,9 @@ impl Node {
         tokio::spawn(async move {
             while let Some(msg) = stdin_rx.recv().await {
                 let mut responder: Option<tokio::sync::oneshot::Sender<Message>> = None;
-                {
+                if let Some(in_reply_to) = msg.body.inner.in_reply_to() {
                     let mut unacked = self.unacked.lock().unwrap();
-                    responder = unacked.remove(&msg.body.msg_id);
+                    responder = unacked.remove(&in_reply_to);
                 }
 
                 if let Some(responder) = responder {
@@ -120,7 +122,7 @@ impl Node {
         rx
     }
 
-    pub async fn spawn_stdout_task(self: Arc<Self>) {
+    async fn spawn_stdout_task(self: Arc<Self>) {
         let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel::<MessageWithResponder>(32);
 
         self.stdout_tx.set(stdout_tx).unwrap();
@@ -144,7 +146,7 @@ impl Node {
         });
     }
 
-    pub async fn spawn_stdin_task(self: Arc<Self>) -> tokio::sync::mpsc::Receiver<Message> {
+    async fn spawn_stdin_task(self: Arc<Self>) -> tokio::sync::mpsc::Receiver<Message> {
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Message>(32);
         tokio::spawn(async move {
             let mut input = String::new();
@@ -163,18 +165,21 @@ impl Node {
                     node_id, node_ids, ..
                 } = &json_msg.body.inner
                 {
-                    self.my_id.set(node_id.into());
+                    self.my_id.set(node_id.into()).unwrap();
 
-                    self.other_node_ids.set(
-                        node_ids
-                            .iter()
-                            .filter(|id| *id != node_id)
-                            .cloned()
-                            .collect(),
-                    );
+                    self.other_node_ids
+                        .set(
+                            node_ids
+                                .iter()
+                                .filter(|id| *id != node_id)
+                                .cloned()
+                                .collect(),
+                        )
+                        .unwrap();
                 }
 
                 stdin_tx.send(json_msg).await.unwrap();
+                yield_now().await;
                 input.clear();
             }
         });
