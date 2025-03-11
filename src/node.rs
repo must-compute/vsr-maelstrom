@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use rand::{rng, Rng};
 use tokio::task::yield_now;
 
 use crate::message::{Body, BodyWithMsgId, Message};
@@ -95,6 +96,14 @@ impl Node {
                 }
             }
         });
+    }
+
+    pub fn get_random_peer(&self) -> String {
+        let other_node_ids = self.other_node_ids.get().unwrap();
+        other_node_ids
+            .get(rand::rng().random_range(0..other_node_ids.len()))
+            .cloned()
+            .unwrap()
     }
 
     pub async fn run(self: Arc<Self>) -> tokio::sync::mpsc::Receiver<Message> {

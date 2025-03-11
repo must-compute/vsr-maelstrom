@@ -66,6 +66,17 @@ pub enum Body {
         view_number: usize,
         commit_number: usize,
     },
+    GetState {
+        view_number: usize,
+        op_number: usize,
+    },
+    NewState {
+        in_reply_to: usize,
+        view_number: usize,
+        missing_log_suffix: Vec<Message>,
+        op_number: usize,
+        commit_number: usize,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -80,6 +91,7 @@ impl Body {
             | Body::WriteOk { in_reply_to, .. }
             | Body::CasOk { in_reply_to, .. }
             | Body::PrepareOk { in_reply_to, .. }
+            | Body::NewState { in_reply_to, .. }
             | Body::Error { in_reply_to, .. } => Some(*in_reply_to),
             Body::Init { .. }
             | Body::InitOk { .. }
@@ -88,6 +100,7 @@ impl Body {
             | Body::Cas { .. }
             | Body::Proxy { .. }
             | Body::Commit { .. }
+            | Body::GetState { .. }
             | Body::Prepare { .. } => None,
         }
     }
@@ -113,6 +126,10 @@ impl Body {
                 ref mut in_reply_to,
                 ..
             }
+            | Body::NewState {
+                ref mut in_reply_to,
+                ..
+            }
             | Body::Error {
                 ref mut in_reply_to,
                 ..
@@ -125,6 +142,7 @@ impl Body {
             | Body::Cas { .. }
             | Body::Prepare { .. }
             | Body::Commit { .. }
+            | Body::GetState { .. }
             | Body::Proxy { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
