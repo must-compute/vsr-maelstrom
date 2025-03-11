@@ -59,6 +59,9 @@ pub enum Body {
         view_numer: usize,
         op_number: usize,
     },
+    Proxy {
+        proxied_msg: Box<Message>,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -79,6 +82,7 @@ impl Body {
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
+            | Body::Proxy { .. }
             | Body::Prepare { .. } => None,
         }
     }
@@ -115,7 +119,8 @@ impl Body {
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
-            | Body::Prepare { .. } => {
+            | Body::Prepare { .. }
+            | Body::Proxy { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
         }

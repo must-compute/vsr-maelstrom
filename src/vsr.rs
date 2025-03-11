@@ -111,16 +111,32 @@ impl VSR {
                     )
                     .await;
             }
+            Body::Proxy { proxied_msg } => {
+                let my_id = self.node.my_id.get().cloned().unwrap();
+                let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                if my_id != leader_id {
+                    self.node
+                        .clone()
+                        .send(leader_id, Body::Proxy { proxied_msg }, None)
+                        .await;
+                } else {
+                    Box::pin(self.handle(*proxied_msg)).await?;
+                }
+            }
             Body::Write { .. } | Body::Read { .. } | Body::Cas { .. } => {
-                let my_id = self.node.my_id.get();
-                if *self.clone().primary_node.lock().unwrap() != *my_id.unwrap() {
-                    let error_body = Body::Error {
-                        in_reply_to: msg.body.msg_id,
-                        code: ErrorCode::Abort,
-                        text: String::from("I AM NOT THE PRIMARY!"),
-                    };
-
-                    self.node.clone().send(msg.src, error_body, None).await;
+                let my_id = self.node.my_id.get().cloned().unwrap();
+                let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                if my_id != leader_id {
+                    self.node
+                        .clone()
+                        .send(
+                            leader_id,
+                            Body::Proxy {
+                                proxied_msg: Box::new(msg),
+                            },
+                            None,
+                        )
+                        .await;
                     return Ok(());
                 }
 
