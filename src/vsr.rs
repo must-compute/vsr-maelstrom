@@ -4,7 +4,10 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
+
+use tokio::{sync::Notify, time::Instant};
 
 use crate::{
     kv_store::KeyValueStore,
@@ -43,6 +46,7 @@ pub struct VSR {
     client_table: Mutex<HashMap<ClientName, ClientTableEntry>>,
     node: Arc<Node>,
     state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>,
+    reset_commit_msg_deadline: Notify,
 }
 
 impl VSR {
@@ -59,11 +63,17 @@ impl VSR {
             client_table: Default::default(),
             node: Arc::new(Node::new()),
             state_machine: Default::default(),
+            reset_commit_msg_deadline: Notify::new(),
         }
     }
 
     pub async fn run(self: Arc<Self>) {
         let mut rx = self.node.clone().run().await;
+
+        let mut commit_msg_deadline = tokio::time::interval_at(
+            Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
 
         loop {
             tokio::select! {
@@ -73,8 +83,36 @@ impl VSR {
                         async move { vsr.handle(msg).await }
                     });
                 }
+                _ = commit_msg_deadline.tick() => {
+                    // There is a chance this might tick before init msg is received.
+                    // We infer that init is done via my_id being Some.
+                    if let Some(my_id) = self.node.my_id.get() {
+                        let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                        if *my_id == leader_id{
+                            self.clone().broadcast_commit_msg().await;
+                        }
+                    }
+                }
+                _ = self.reset_commit_msg_deadline.notified() => {
+                    commit_msg_deadline.reset();
+                }
+
             };
         }
+    }
+
+    async fn broadcast_commit_msg(self: Arc<Self>) {
+        let commit_number = self.commit_number.load(Ordering::SeqCst);
+        let op_number = self.op_number.load(Ordering::SeqCst);
+
+        // Normal Operation s6: note that in this case commitnumber = op-number
+        // assert_eq!(commit_number, op_number);
+
+        let body = Body::Commit {
+            view_number: self.view_number.load(Ordering::SeqCst),
+            commit_number,
+        };
+        self.node.clone().broadcast(body, None).await;
     }
 
     async fn handle(self: Arc<Self>, msg: Message) -> anyhow::Result<()> {
@@ -205,6 +243,23 @@ impl VSR {
                     )
                     .await;
             }
+            Body::Commit {
+                view_number,
+                commit_number,
+            } => {
+                // TODO possibly trigger view change if view_number is higher than ours
+                // TODO maybe we should index by commit_number. We also need to catch up before doing this.
+                let client_request = self.op_log.lock().unwrap().last().cloned().unwrap();
+
+                let response_body = self.clone().apply_to_state_machine(&client_request).await;
+                self.client_table.lock().unwrap().insert(
+                    client_request.src.clone(),
+                    ClientTableEntry {
+                        request_number: client_request.body.msg_id,
+                        response_body: Some(response_body),
+                    },
+                );
+            }
             _ => {
                 todo!()
             }
@@ -237,8 +292,11 @@ impl VSR {
             op_number: self.op_number.load(Ordering::SeqCst),
             commit_number: self.commit_number.load(Ordering::SeqCst),
         };
+
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(replica_count);
         self.node.clone().broadcast(body, Some(tx)).await;
+
+        self.reset_commit_msg_deadline.notify_one();
 
         // We count ourselves as part of the consensus majority
         let mut remaining_response_count = self.clone().majority_count() - 1;

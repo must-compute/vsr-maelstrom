@@ -62,6 +62,10 @@ pub enum Body {
     Proxy {
         proxied_msg: Box<Message>,
     },
+    Commit {
+        view_number: usize,
+        commit_number: usize,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -83,6 +87,7 @@ impl Body {
             | Body::Write { .. }
             | Body::Cas { .. }
             | Body::Proxy { .. }
+            | Body::Commit { .. }
             | Body::Prepare { .. } => None,
         }
     }
@@ -114,12 +119,12 @@ impl Body {
             } => {
                 *in_reply_to = new_in_reply_to;
             }
-
             Body::Init { .. }
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
             | Body::Prepare { .. }
+            | Body::Commit { .. }
             | Body::Proxy { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
