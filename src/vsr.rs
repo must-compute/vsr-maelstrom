@@ -237,7 +237,6 @@ impl VSR {
                 }
             }
             Body::Prepare { op, op_number, .. } => {
-                //TODO check if we need to catch up on previous ops
                 if op_number > self.op_number.load(Ordering::SeqCst) + 1 {
                     self.clone().catch_up().await;
                 }
@@ -261,11 +260,14 @@ impl VSR {
                 view_number,
                 commit_number,
             } => {
-                // TODO possibly trigger view change if view_number is higher than ours
-                // TODO maybe we should index by commit_number. We also need to catch up before doing this.
+                let my_op_number = self.op_number.load(Ordering::SeqCst);
                 if commit_number > self.commit_number.load(Ordering::SeqCst) {
-                    let client_request = self.op_log.lock().unwrap().last().cloned().unwrap();
-                    self.commit_op(&client_request).await;
+                    if commit_number > my_op_number {
+                        self.clone().catch_up().await;
+                    } else {
+                        let client_request = self.op_log.lock().unwrap().last().cloned().unwrap();
+                        self.commit_op(&client_request).await;
+                    }
                 }
             }
             Body::GetState {
@@ -355,7 +357,7 @@ impl VSR {
             panic!("should receive a NewState as a response to GetState");
         };
 
-        //todo fix
+        //TODO fix? (there might be an off-by one error in some case)
         for op in &missing_log_suffix {
             self.clone().prepare_op(op).await;
             self.clone().commit_op(op).await;
