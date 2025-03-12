@@ -121,7 +121,9 @@ impl Node {
                 }
 
                 if let Some(responder) = responder {
-                    responder.send(msg).unwrap();
+                    if !responder.is_closed() {
+                        let _ = responder.send(msg);
+                    }
                 } else {
                     tx.send(msg).await.unwrap();
                 }
