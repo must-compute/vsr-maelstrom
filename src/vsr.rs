@@ -176,11 +176,10 @@ impl VSR {
                     return Ok(());
                 }
 
-                let mut response = None;
-                {
+                let response = {
                     let client_table_guard = self.client_table.lock().unwrap();
-                    response = client_table_guard.get(&msg.src).cloned();
-                }
+                    client_table_guard.get(&msg.src).cloned()
+                };
 
                 match response {
                     Some(ClientTableEntry {
@@ -191,6 +190,27 @@ impl VSR {
                             .node
                             .clone()
                             .send(msg.src, cached_response_body, None)
+                            .await;
+                    }
+
+                    Some(ClientTableEntry {
+                        request_number,
+                        response_body: None,
+                    }) if msg.body.msg_id >= request_number => {
+                        let error_text =
+                            String::from("Normal Protocol: received more than one in-flight request by the same client");
+                        let _ = self
+                            .node
+                            .clone()
+                            .send(
+                                msg.src,
+                                Body::Error {
+                                    in_reply_to: msg.body.msg_id,
+                                    code: crate::message::ErrorCode::Abort,
+                                    text: error_text,
+                                },
+                                None,
+                            )
                             .await;
                     }
                     Some(ClientTableEntry { request_number, .. })
@@ -335,6 +355,7 @@ impl VSR {
             panic!("should receive a NewState as a response to GetState");
         };
 
+        //todo fix
         for op in &missing_log_suffix {
             self.clone().prepare_op(op).await;
             self.clone().commit_op(op).await;
