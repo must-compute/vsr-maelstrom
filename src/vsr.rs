@@ -8,7 +8,10 @@ use std::{
     time::Duration,
 };
 
-use tokio::{sync::Notify, time::Instant};
+use tokio::{
+    sync::Notify,
+    time::{timeout, Instant},
+};
 
 use crate::{
     kv_store::KeyValueStore,
@@ -326,45 +329,48 @@ impl VSR {
     }
 
     async fn catch_up(self: Arc<Self>) {
-        // VSR only requires us to GetState from any other node that has the info.
-        // To simplify things, here we GetState from all other nodes instead, in
-        // case our randomly chosen node was unavailable/unresponsive.
-        // TODO only call one node at a time when using GetState, and deal with retry/timeouts
-        //      and trying other nodes if needed.
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel(self.node.other_node_ids.get().unwrap().len());
-        self.node
-            .clone()
-            .broadcast(
-                Body::GetState {
-                    view_number: self.view_number.load(Ordering::SeqCst),
-                    op_number: self.op_number.load(Ordering::SeqCst),
-                },
-                Some(tx),
-            )
-            .await;
+        loop {
+            let random_peer = self.node.get_random_peer();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.node
+                .clone()
+                .send(
+                    random_peer,
+                    Body::GetState {
+                        view_number: self.view_number.load(Ordering::SeqCst),
+                        op_number: self.op_number.load(Ordering::SeqCst),
+                    },
+                    Some(tx),
+                )
+                .await;
 
-        let response = rx.recv().await.unwrap();
+            let timeout = timeout(Duration::from_millis(500), rx).await;
+            match timeout {
+                Ok(response) => {
+                    let Body::NewState {
+                        view_number,
+                        missing_log_suffix,
+                        op_number,
+                        commit_number,
+                        ..
+                    } = response.unwrap().body.inner
+                    else {
+                        panic!("should receive a NewState as a response to GetState");
+                    };
 
-        let Body::NewState {
-            view_number,
-            missing_log_suffix,
-            op_number,
-            commit_number,
-            ..
-        } = response.body.inner
-        else {
-            panic!("should receive a NewState as a response to GetState");
-        };
+                    //TODO fix? (there might be an off-by one error in some case)
+                    for op in &missing_log_suffix {
+                        self.clone().prepare_op(op).await;
+                        self.clone().commit_op(op).await;
+                    }
 
-        //TODO fix? (there might be an off-by one error in some case)
-        for op in &missing_log_suffix {
-            self.clone().prepare_op(op).await;
-            self.clone().commit_op(op).await;
+                    assert_eq!(self.op_number.load(Ordering::SeqCst), op_number);
+                    assert_eq!(self.commit_number.load(Ordering::SeqCst), commit_number);
+                    break;
+                }
+                Err(_) => continue,
+            }
         }
-
-        assert_eq!(self.op_number.load(Ordering::SeqCst), op_number);
-        assert_eq!(self.commit_number.load(Ordering::SeqCst), commit_number);
     }
 
     async fn handle_client_request(self: Arc<Self>, msg: Message) {
