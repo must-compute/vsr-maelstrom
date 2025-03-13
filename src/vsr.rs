@@ -1,5 +1,6 @@
 use core::panic;
 use std::{
+    cmp::max,
     collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -53,6 +54,8 @@ pub struct VSR {
     reset_commit_msg_deadline_notifier: Notify,
     reset_view_change_deadline_notifier: Notify,
     last_normal_status_view_number: AtomicUsize,
+    start_view_change_accumulator: AtomicUsize,
+    do_view_change_accumulator: Mutex<Vec<Message>>,
 }
 
 impl VSR {
@@ -71,6 +74,8 @@ impl VSR {
             reset_commit_msg_deadline_notifier: Notify::new(),
             reset_view_change_deadline_notifier: Notify::new(),
             last_normal_status_view_number: AtomicUsize::default(),
+            start_view_change_accumulator: AtomicUsize::default(),
+            do_view_change_accumulator: Mutex::new(Vec::new()),
         }
     }
 
@@ -187,7 +192,7 @@ impl VSR {
     }
 
     async fn handle(self: Arc<Self>, msg: Message) -> anyhow::Result<()> {
-        match msg.body.inner {
+        match msg.body.inner.clone() {
             Body::Init { node_id, node_ids } => {
                 {
                     let mut configuration_guard = self.configuration.lock().unwrap();
@@ -387,7 +392,17 @@ impl VSR {
                 if view_number > my_view_number {
                     // TODO switch to view change mode
                     self.view_number.store(view_number, Ordering::SeqCst);
-                    self.switch_node_status_to(NodeStatus::ViewChange);
+
+                    {
+                        let status_guard = self.status.lock().unwrap();
+                        match *status_guard {
+                            NodeStatus::Normal => {
+                                self.switch_node_status_to(NodeStatus::ViewChange)
+                            }
+                            NodeStatus::ViewChange => (),
+                            NodeStatus::Recovering => return Ok(()), // TODO are we sure?                    }
+                        }
+                    }
 
                     self.node
                         .clone()
@@ -403,32 +418,33 @@ impl VSR {
                 }
 
                 // At this stage, we conclude that view_number == my_view_number.
+                assert_eq!(*self.status.lock().unwrap(), NodeStatus::ViewChange);
+
                 // TODO check if we got f StartViewChange msgs
 
-                // self.reset_view_change_deadline_notifier.notify_one();
+                self.start_view_change_accumulator
+                    .fetch_add(1, Ordering::SeqCst);
 
+                //We count ourselves as already accumulated
+                if self.start_view_change_accumulator.load(Ordering::SeqCst)
+                    >= self.majority_count() - 1
                 {
-                    let status_guard = self.status.lock().unwrap();
-                    match *status_guard {
-                        NodeStatus::Normal => self.switch_node_status_to(NodeStatus::ViewChange),
-                        NodeStatus::ViewChange => (),
-                        NodeStatus::Recovering => return Ok(()), // TODO are we sure?                    }
-                    }
+                    // self.reset_view_change_deadline_notifier.notify_one();
+
+                    let primary = self.primary_node_at_view_number(view_number);
+
+                    let body = Body::DoViewChange {
+                        view_number,
+                        log: self.op_log.lock().unwrap().clone(),
+                        last_normal_status_view_number: self
+                            .last_normal_status_view_number
+                            .load(Ordering::SeqCst),
+                        op_number: self.op_number.load(Ordering::SeqCst),
+                        commit_number: self.commit_number.load(Ordering::SeqCst),
+                    };
+
+                    self.node.clone().send(primary, body, None).await;
                 }
-
-                let primary = self.primary_node_at_view_number(view_number);
-
-                let body = Body::DoViewChange {
-                    view_number,
-                    log: self.op_log.lock().unwrap().clone(),
-                    last_normal_status_view_number: self
-                        .last_normal_status_view_number
-                        .load(Ordering::SeqCst),
-                    op_number: self.op_number.load(Ordering::SeqCst),
-                    commit_number: self.commit_number.load(Ordering::SeqCst),
-                };
-
-                self.node.clone().send(primary, body, None).await;
             }
             Body::DoViewChange {
                 view_number,
@@ -437,7 +453,28 @@ impl VSR {
                 op_number,
                 commit_number,
             } => {
-                //TODO record last normal if we are in normal mode now
+                let mut do_view_change_accumulator =
+                    self.do_view_change_accumulator.lock().unwrap();
+
+                do_view_change_accumulator.push(msg);
+
+                if do_view_change_accumulator.len() < self.majority_count() {
+                    return Ok(());
+                }
+
+                let status = self.status.lock().unwrap().clone();
+                match status {
+                    NodeStatus::Recovering => return Ok(()),
+                    NodeStatus::Normal | NodeStatus::ViewChange => {
+                        self.view_number.store(view_number, Ordering::SeqCst);
+
+                        //TODO selects as the new log the one contained in
+                        // the message with the largest v 0 ; if several messages
+                        // have the same v 0 it selects the one among them with the largest n.  }
+
+                        // self.op_number =
+                    }
+                }
             }
             _ => {
                 todo!()
@@ -548,7 +585,7 @@ impl VSR {
         self.reset_commit_msg_deadline_notifier.notify_one();
 
         // We count ourselves as part of the consensus majority
-        let mut remaining_response_count = self.clone().majority_count() - 1;
+        let mut remaining_response_count = self.majority_count() - 1;
 
         while let Some(response) = rx.recv().await {
             tracing::debug!("remaining_response_count: {remaining_response_count}");
@@ -642,7 +679,7 @@ impl VSR {
         }
     }
 
-    fn majority_count(self: Arc<Self>) -> usize {
+    fn majority_count(&self) -> usize {
         let all_nodes_count = self.node.other_node_ids.get().unwrap().len() + 1;
         (all_nodes_count / 2) + 1
     }
