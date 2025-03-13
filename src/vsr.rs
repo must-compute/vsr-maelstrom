@@ -153,7 +153,7 @@ impl VSR {
 
         //TODO Record last normal
         self.view_number.fetch_add(1, Ordering::SeqCst);
-        *self.status.lock().unwrap() = NodeStatus::ViewChange;
+        self.switch_node_status_to(NodeStatus::ViewChange);
 
         self.node
             .clone()
@@ -164,6 +164,16 @@ impl VSR {
                 None,
             )
             .await;
+    }
+
+    fn switch_node_status_to(&self, new_status: NodeStatus) {
+        match &new_status {
+            NodeStatus::Normal => self
+                .last_normal_status_view_number
+                .store(self.view_number.load(Ordering::SeqCst), Ordering::SeqCst),
+            _ => (),
+        };
+        *self.status.lock().unwrap() = new_status;
     }
 
     async fn broadcast_commit_msg(self: Arc<Self>) {
@@ -368,22 +378,57 @@ impl VSR {
                 self.node.clone().send(msg.src, body, None).await;
             }
             Body::StartViewChange { view_number } => {
-                //TODO record last normal if we are in normal mode now
-
-                if view_number >= self.view_number.load(Ordering::SeqCst) {
-                    let primary = self.primary_node_at_view_number(view_number);
-
-                    let body = Body::DoViewChange {
-                        view_number,
-                        log: self.op_log.lock().unwrap().clone(),
-                        //TODO update this accordingly ( possibly many places )
-                        last_normal_status_view_number: self
-                            .last_normal_status_view_number
-                            .load(Ordering::SeqCst),
-                        op_number: self.op_number.load(Ordering::SeqCst),
-                        commit_number: self.commit_number.load(Ordering::SeqCst),
-                    };
+                let my_view_number = self.view_number.load(Ordering::SeqCst);
+                let should_ignore = view_number < my_view_number;
+                if should_ignore {
+                    return Ok(());
                 }
+
+                if view_number > my_view_number {
+                    // TODO switch to view change mode
+                    self.view_number.store(view_number, Ordering::SeqCst);
+                    self.switch_node_status_to(NodeStatus::ViewChange);
+
+                    self.node
+                        .clone()
+                        .broadcast(
+                            Body::StartViewChange {
+                                view_number: self.view_number.load(Ordering::SeqCst),
+                            },
+                            None,
+                        )
+                        .await;
+
+                    return Ok(());
+                }
+
+                // At this stage, we conclude that view_number == my_view_number.
+                // TODO check if we got f StartViewChange msgs
+
+                // self.reset_view_change_deadline_notifier.notify_one();
+
+                {
+                    let status_guard = self.status.lock().unwrap();
+                    match *status_guard {
+                        NodeStatus::Normal => self.switch_node_status_to(NodeStatus::ViewChange),
+                        NodeStatus::ViewChange => (),
+                        NodeStatus::Recovering => return Ok(()), // TODO are we sure?                    }
+                    }
+                }
+
+                let primary = self.primary_node_at_view_number(view_number);
+
+                let body = Body::DoViewChange {
+                    view_number,
+                    log: self.op_log.lock().unwrap().clone(),
+                    last_normal_status_view_number: self
+                        .last_normal_status_view_number
+                        .load(Ordering::SeqCst),
+                    op_number: self.op_number.load(Ordering::SeqCst),
+                    commit_number: self.commit_number.load(Ordering::SeqCst),
+                };
+
+                self.node.clone().send(primary, body, None).await;
             }
             Body::DoViewChange {
                 view_number,
