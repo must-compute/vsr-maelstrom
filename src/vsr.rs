@@ -52,6 +52,7 @@ pub struct VSR {
     node: Arc<Node>,
     state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>,
     reset_commit_msg_deadline_notifier: Notify,
+    reset_view_change_deadline_notifier: Notify,
 }
 
 impl VSR {
@@ -69,15 +70,24 @@ impl VSR {
             node: Arc::new(Node::new()),
             state_machine: Default::default(),
             reset_commit_msg_deadline_notifier: Notify::new(),
+            reset_view_change_deadline_notifier: Notify::new(),
         }
     }
 
     pub async fn run(self: Arc<Self>) {
         let mut rx = self.node.clone().run().await;
 
+        let commit_msg_deadline_duration = Duration::from_millis(100);
+        let view_change_deadline_duration = commit_msg_deadline_duration * 2;
+
         let mut commit_msg_deadline = tokio::time::interval_at(
-            Instant::now() + Duration::from_millis(100),
-            Duration::from_millis(100),
+            Instant::now() + commit_msg_deadline_duration,
+            commit_msg_deadline_duration,
+        );
+
+        let mut view_change_deadline = tokio::time::interval_at(
+            Instant::now() + view_change_deadline_duration,
+            view_change_deadline_duration,
         );
 
         loop {
@@ -100,6 +110,20 @@ impl VSR {
                 }
                 _ = self.reset_commit_msg_deadline_notifier.notified() => {
                     commit_msg_deadline.reset();
+                }
+                _ = view_change_deadline.tick() => {
+                    // There is a chance this might tick before init msg is received.
+                    // We infer that init is done via my_id being Some.
+                    if let Some(my_id) = self.node.my_id.get() {
+                        let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                        if *my_id != leader_id{
+                            tracing::debug!("view change deadline elapsed. Initiating view change protocol");
+                            //TODO initiate view change
+                        }
+                    }
+                }
+                _ = self.reset_view_change_deadline_notifier.notified() => {
+                    view_change_deadline.reset();
                 }
 
             };
@@ -239,7 +263,16 @@ impl VSR {
                     _ => self.handle_client_request(msg).await,
                 }
             }
-            Body::Prepare { op, op_number, .. } => {
+            Body::Prepare {
+                op,
+                op_number,
+                view_number,
+                ..
+            } => {
+                if view_number >= self.view_number.load(Ordering::SeqCst) {
+                    self.reset_view_change_deadline_notifier.notify_one();
+                }
+
                 if op_number > self.op_number.load(Ordering::SeqCst) + 1 {
                     self.clone().catch_up().await;
                 }
@@ -263,6 +296,10 @@ impl VSR {
                 view_number,
                 commit_number,
             } => {
+                if view_number >= self.view_number.load(Ordering::SeqCst) {
+                    self.reset_view_change_deadline_notifier.notify_one();
+                }
+
                 let my_op_number = self.op_number.load(Ordering::SeqCst);
                 if commit_number > self.commit_number.load(Ordering::SeqCst) {
                     if commit_number > my_op_number {
