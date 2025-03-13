@@ -51,7 +51,7 @@ pub struct VSR {
     client_table: Mutex<HashMap<ClientName, ClientTableEntry>>,
     node: Arc<Node>,
     state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>,
-    reset_commit_msg_deadline: Notify,
+    reset_commit_msg_deadline_notifier: Notify,
 }
 
 impl VSR {
@@ -68,7 +68,7 @@ impl VSR {
             client_table: Default::default(),
             node: Arc::new(Node::new()),
             state_machine: Default::default(),
-            reset_commit_msg_deadline: Notify::new(),
+            reset_commit_msg_deadline_notifier: Notify::new(),
         }
     }
 
@@ -98,7 +98,7 @@ impl VSR {
                         }
                     }
                 }
-                _ = self.reset_commit_msg_deadline.notified() => {
+                _ = self.reset_commit_msg_deadline_notifier.notified() => {
                     commit_msg_deadline.reset();
                 }
 
@@ -402,7 +402,7 @@ impl VSR {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(replica_count);
         self.node.clone().broadcast(body, Some(tx)).await;
 
-        self.reset_commit_msg_deadline.notify_one();
+        self.reset_commit_msg_deadline_notifier.notify_one();
 
         // We count ourselves as part of the consensus majority
         let mut remaining_response_count = self.clone().majority_count() - 1;
