@@ -44,7 +44,6 @@ pub struct VSR {
     op_number: AtomicUsize,
     commit_number: AtomicUsize,
     view_number: AtomicUsize,
-    primary_node: Mutex<NodeName>,
     status: Mutex<NodeStatus>,
     configuration: Mutex<Vec<NodeName>>, // All nodes in the cluster
     replica_number: AtomicUsize,
@@ -53,6 +52,7 @@ pub struct VSR {
     state_machine: Mutex<KeyValueStore<StateMachineKey, StateMachineValue>>,
     reset_commit_msg_deadline_notifier: Notify,
     reset_view_change_deadline_notifier: Notify,
+    last_normal_status_view_number: AtomicUsize,
 }
 
 impl VSR {
@@ -62,7 +62,6 @@ impl VSR {
             op_number: AtomicUsize::new(0),
             commit_number: AtomicUsize::new(0),
             view_number: AtomicUsize::new(0),
-            primary_node: Default::default(),
             status: Mutex::new(NodeStatus::Normal),
             configuration: Default::default(),
             replica_number: AtomicUsize::new(0),
@@ -71,6 +70,7 @@ impl VSR {
             state_machine: Default::default(),
             reset_commit_msg_deadline_notifier: Notify::new(),
             reset_view_change_deadline_notifier: Notify::new(),
+            last_normal_status_view_number: AtomicUsize::default(),
         }
     }
 
@@ -102,7 +102,7 @@ impl VSR {
                     // There is a chance this might tick before init msg is received.
                     // We infer that init is done via my_id being Some.
                     if let Some(my_id) = self.node.my_id.get() {
-                        let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                        let leader_id = self.current_primary_node();
                         if *my_id == leader_id{
                             self.clone().broadcast_commit_msg().await;
                         }
@@ -112,15 +112,8 @@ impl VSR {
                     commit_msg_deadline.reset();
                 }
                 _ = view_change_deadline.tick() => {
-                    // There is a chance this might tick before init msg is received.
-                    // We infer that init is done via my_id being Some.
-                    if let Some(my_id) = self.node.my_id.get() {
-                        let leader_id = self.clone().primary_node.lock().unwrap().clone();
-                        if *my_id != leader_id{
-                            tracing::debug!("view change deadline elapsed. Initiating view change protocol");
-                            //TODO initiate view change
-                        }
-                    }
+                    self.clone().perform_view_change_if_needed().await;
+
                 }
                 _ = self.reset_view_change_deadline_notifier.notified() => {
                     view_change_deadline.reset();
@@ -128,6 +121,49 @@ impl VSR {
 
             };
         }
+    }
+
+    fn current_primary_node(&self) -> String {
+        self.primary_node_at_view_number(self.view_number.load(Ordering::SeqCst))
+    }
+
+    fn primary_node_at_view_number(&self, view_number: usize) -> String {
+        let configuration = self.configuration.lock().unwrap();
+        configuration
+            .get(view_number % configuration.len())
+            .cloned()
+            .unwrap()
+    }
+
+    async fn perform_view_change_if_needed(self: Arc<Self>) {
+        let my_id = self.node.my_id.get();
+
+        //we are not initialized yet
+        if my_id.is_none() {
+            return;
+        }
+
+        //we are the leader, no need to change view
+        if *my_id.unwrap() == self.current_primary_node() {
+            return;
+        }
+
+        //happy path
+        tracing::debug!("view change deadline elapsed. Initiating view change protocol");
+
+        //TODO Record last normal
+        self.view_number.fetch_add(1, Ordering::SeqCst);
+        *self.status.lock().unwrap() = NodeStatus::ViewChange;
+
+        self.node
+            .clone()
+            .broadcast(
+                Body::StartViewChange {
+                    view_number: self.view_number.load(Ordering::SeqCst),
+                },
+                None,
+            )
+            .await;
     }
 
     async fn broadcast_commit_msg(self: Arc<Self>) {
@@ -158,8 +194,6 @@ impl VSR {
                         .unwrap();
 
                     self.replica_number.store(my_replica, Ordering::SeqCst);
-                    *self.primary_node.lock().unwrap() =
-                        configuration_guard.first().unwrap().clone();
                 }
 
                 let _ = self
@@ -176,7 +210,7 @@ impl VSR {
             }
             Body::Proxy { proxied_msg } => {
                 let my_id = self.node.my_id.get().cloned().unwrap();
-                let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                let leader_id = self.current_primary_node();
                 if my_id != leader_id {
                     self.node
                         .clone()
@@ -188,7 +222,7 @@ impl VSR {
             }
             Body::Write { .. } | Body::Read { .. } | Body::Cas { .. } => {
                 let my_id = self.node.my_id.get().cloned().unwrap();
-                let leader_id = self.clone().primary_node.lock().unwrap().clone();
+                let leader_id = self.current_primary_node();
                 if my_id != leader_id {
                     self.node
                         .clone()
@@ -332,6 +366,33 @@ impl VSR {
                 };
 
                 self.node.clone().send(msg.src, body, None).await;
+            }
+            Body::StartViewChange { view_number } => {
+                //TODO record last normal if we are in normal mode now
+
+                if view_number >= self.view_number.load(Ordering::SeqCst) {
+                    let primary = self.primary_node_at_view_number(view_number);
+
+                    let body = Body::DoViewChange {
+                        view_number,
+                        log: self.op_log.lock().unwrap().clone(),
+                        //TODO update this accordingly ( possibly many places )
+                        last_normal_status_view_number: self
+                            .last_normal_status_view_number
+                            .load(Ordering::SeqCst),
+                        op_number: self.op_number.load(Ordering::SeqCst),
+                        commit_number: self.commit_number.load(Ordering::SeqCst),
+                    };
+                }
+            }
+            Body::DoViewChange {
+                view_number,
+                log,
+                last_normal_status_view_number,
+                op_number,
+                commit_number,
+            } => {
+                //TODO record last normal if we are in normal mode now
             }
             _ => {
                 todo!()
