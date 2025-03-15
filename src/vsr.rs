@@ -16,7 +16,7 @@ use tokio::{
 
 use crate::{
     kv_store::KeyValueStore,
-    message::{Body, ErrorCode, Message},
+    message::{Body, BodyWithMsgId, ErrorCode, Message},
     node::Node,
 };
 
@@ -447,32 +447,93 @@ impl VSR {
                 }
             }
             Body::DoViewChange {
-                view_number,
-                log,
-                last_normal_status_view_number,
-                op_number,
-                commit_number,
+                view_number: latest_view_number,
+                ..
             } => {
-                let mut do_view_change_accumulator =
-                    self.do_view_change_accumulator.lock().unwrap();
-
-                do_view_change_accumulator.push(msg);
-
-                if do_view_change_accumulator.len() < self.majority_count() {
-                    return Ok(());
-                }
-
                 let status = self.status.lock().unwrap().clone();
                 match status {
                     NodeStatus::Recovering => return Ok(()),
                     NodeStatus::Normal | NodeStatus::ViewChange => {
-                        self.view_number.store(view_number, Ordering::SeqCst);
+                        {
+                            let mut do_view_change_accumulator =
+                                self.do_view_change_accumulator.lock().unwrap();
+                            do_view_change_accumulator.push(msg);
+                            if do_view_change_accumulator.len() < self.majority_count() {
+                                return Ok(());
+                            }
 
-                        //TODO selects as the new log the one contained in
-                        // the message with the largest v 0 ; if several messages
-                        // have the same v 0 it selects the one among them with the largest n.  }
+                            let all_do_view_change_msgs_have_identical_view_numbers =
+                                do_view_change_accumulator.iter().all(|msg| {
+                                    let Body::DoViewChange { view_number, .. } = msg.body.inner
+                                    else {
+                                        unreachable!()
+                                    };
 
-                        // self.op_number =
+                                    view_number == latest_view_number
+                                });
+                            assert!(all_do_view_change_msgs_have_identical_view_numbers);
+                            self.view_number.store(latest_view_number, Ordering::SeqCst);
+
+                            // We need to choose the latest log.
+                            let mut logs_to_choose_from = do_view_change_accumulator
+                                .iter()
+                                .map(|msg| {
+                                    let Body::DoViewChange {
+                                        last_normal_status_view_number,
+                                        op_number,
+                                        log,
+                                        ..
+                                    } = &msg.body.inner
+                                    else {
+                                        unreachable!()
+                                    };
+                                    // This tuple will help us find the latest log.
+                                    (
+                                        last_normal_status_view_number, // the paper calls this: v'
+                                        op_number,                      // <-- and calls this: n
+                                        log,
+                                    )
+                                })
+                                .collect::<Vec<(_, _, _)>>();
+                            logs_to_choose_from.sort_by(|v_prime, n| {
+                                v_prime.0.cmp(&n.0).then_with(|| v_prime.1.cmp(&n.1))
+                            });
+                            let (_, _, latest_log) = logs_to_choose_from.first().unwrap();
+                            *self.op_log.lock().unwrap() = latest_log.to_vec();
+
+                            let Body::DoViewChange {
+                                op_number: latest_op_number,
+                                ..
+                            } = latest_log.last().unwrap().body.inner
+                            else {
+                                unreachable!()
+                            };
+                            self.op_number.store(latest_op_number, Ordering::SeqCst);
+
+                            let latest_commit_number = do_view_change_accumulator
+                                .iter()
+                                .map(|msg| {
+                                    let Body::DoViewChange { commit_number, .. } = msg.body.inner
+                                    else {
+                                        unreachable!()
+                                    };
+                                    commit_number
+                                })
+                                .max()
+                                .unwrap();
+                            self.commit_number
+                                .store(latest_commit_number, Ordering::SeqCst);
+                        }
+
+                        self.switch_node_status_to(NodeStatus::Normal);
+
+                        let body = Body::StartView {
+                            view_number: self.view_number.load(Ordering::SeqCst),
+                            log: self.op_log.lock().unwrap().clone(),
+                            op_number: self.op_number.load(Ordering::SeqCst),
+                            commit_number: self.commit_number.load(Ordering::SeqCst),
+                        };
+                        self.node.clone().broadcast(body, None).await;
                     }
                 }
             }

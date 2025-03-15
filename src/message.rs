@@ -87,6 +87,12 @@ pub enum Body {
         op_number: usize,
         commit_number: usize,
     },
+    StartView {
+        view_number: usize,
+        log: Vec<Message>,
+        op_number: usize,
+        commit_number: usize,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -113,6 +119,7 @@ impl Body {
             | Body::GetState { .. }
             | Body::StartViewChange { .. }
             | Body::DoViewChange { .. }
+            | Body::StartView { .. }
             | Body::Prepare { .. } => None,
         }
     }
@@ -157,6 +164,7 @@ impl Body {
             | Body::GetState { .. }
             | Body::StartViewChange { .. }
             | Body::DoViewChange { .. }
+            | Body::StartView { .. }
             | Body::Proxy { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
