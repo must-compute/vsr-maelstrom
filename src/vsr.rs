@@ -545,7 +545,11 @@ impl VSR {
     }
 
     async fn prepare_op(self: Arc<Self>, op: &Message) {
+        self.clone().prepare_op_no_increment(op).await;
         self.op_number.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn prepare_op_no_increment(self: Arc<Self>, op: &Message) {
         self.op_log.lock().unwrap().push(op.clone());
 
         self.client_table.lock().unwrap().insert(
@@ -558,8 +562,12 @@ impl VSR {
     }
 
     async fn commit_op(self: Arc<Self>, op: &Message) {
-        let response_body = self.clone().apply_to_state_machine(op).await;
+        self.clone().commit_op_no_increment(op).await;
         self.commit_number.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn commit_op_no_increment(self: Arc<Self>, op: &Message) {
+        let response_body = self.clone().apply_to_state_machine(op).await;
         self.client_table.lock().unwrap().insert(
             op.src.clone(),
             ClientTableEntry {
