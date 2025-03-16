@@ -445,7 +445,11 @@ impl VSR {
                     return Ok(());
                 }
 
-                let missing_log_suffix = self.op_log.lock().unwrap()[op_number..].to_vec();
+                let missing_log_suffix = self.op_log.lock().unwrap()[op_number..]
+                    .iter()
+                    .skip(1) // i.e. do not include the op matching the requester's op_number
+                    .cloned()
+                    .collect::<Vec<_>>();
 
                 let body = Body::NewState {
                     in_reply_to: msg.body.msg_id,
