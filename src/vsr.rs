@@ -541,6 +541,11 @@ impl VSR {
                         self.node.clone().broadcast(body, None).await;
 
                         // The new primary executes any commited operations it hadn't executed previously.
+                        // This is per step 4 of the VSR paper.
+                        // TODO Here the paper states "updates its client table, and sends the
+                        //      replies to the clients". This seems to assume that clients
+                        //      might be ok with potentially receiving the same reply more than once
+                        //      but I'm not sure yet. Skipping this tiny step for now.
                         let op_log = self.op_log.lock().unwrap().clone();
                         for op in &op_log[existing_commit_number..=updated_commit_number] {
                             self.clone().prepare_op_no_increment(op).await;
