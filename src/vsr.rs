@@ -721,12 +721,12 @@ impl VSR {
                     assert_eq!(
                         self.op_number.load(Ordering::SeqCst),
                         op_number,
-                        "catch up: operation numbers must match after catching up"
+                        "catch up: operation numbers must match after catching up (left is my op_number)"
                     );
                     assert_eq!(
                         self.commit_number.load(Ordering::SeqCst),
                         commit_number,
-                        "catch up: commit numbers must match after catching up"
+                        "catch up: commit numbers must match after catching up (left is my commit_number)"
                     );
                     break;
                 }
