@@ -587,13 +587,7 @@ impl VSR {
                             let (_, _, latest_log) = logs_to_choose_from.first().unwrap();
                             *self.op_log.lock().unwrap() = latest_log.to_vec();
 
-                            let Body::DoViewChange {
-                                op_number: latest_op_number,
-                                ..
-                            } = latest_log.last().unwrap().body.inner
-                            else {
-                                unreachable!()
-                            };
+                            let latest_op_number = latest_log.len();
                             self.op_number.store(latest_op_number, Ordering::SeqCst);
 
                             let latest_commit_number = do_view_change_accumulator
