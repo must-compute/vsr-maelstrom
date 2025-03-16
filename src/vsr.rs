@@ -450,6 +450,9 @@ impl VSR {
                 view_number: latest_view_number,
                 ..
             } => {
+                let mut existing_commit_number = self.commit_number.load(Ordering::SeqCst);
+                let mut updated_commit_number = 0;
+
                 let status = self.status.lock().unwrap().clone();
                 match status {
                     NodeStatus::Recovering => return Ok(()),
@@ -521,8 +524,10 @@ impl VSR {
                                 })
                                 .max()
                                 .unwrap();
-                            self.commit_number
-                                .store(latest_commit_number, Ordering::SeqCst);
+                            existing_commit_number = self
+                                .commit_number
+                                .swap(latest_commit_number, Ordering::SeqCst);
+                            updated_commit_number = latest_commit_number;
                         }
 
                         self.switch_node_status_to(NodeStatus::Normal);
@@ -534,6 +539,18 @@ impl VSR {
                             commit_number: self.commit_number.load(Ordering::SeqCst),
                         };
                         self.node.clone().broadcast(body, None).await;
+
+                        // The new primary executes any commited operations it hadn't executed previously.
+                        let op_log = self.op_log.lock().unwrap().clone();
+                        for op in &op_log[existing_commit_number..=updated_commit_number] {
+                            self.clone().prepare_op_no_increment(op).await;
+                            self.clone().commit_op_no_increment(op).await;
+                        }
+
+                        // At this point, there _might_ be some ops in the operation log that haven't been commited.
+                        // Upon receiving StartView, replicas will send PrepareOk with the latest op number if they
+                        // notice any uncomitted ops, which will cause the primary to commit all of those uncomitted ops
+                        // in order (as usual for PrepareOk).
                     }
                 }
             }
@@ -677,10 +694,11 @@ impl VSR {
             }
         }
 
+        // TODO refactor to use commit_op()
+        // TODO this needs to be applied to this op and all earlier ones since
+        //      commit_number.
         self.commit_number.fetch_add(1, Ordering::SeqCst);
-
         let response_body = self.clone().apply_to_state_machine(&msg).await;
-
         self.client_table.lock().unwrap().insert(
             msg.src.clone(),
             ClientTableEntry {
