@@ -643,7 +643,11 @@ impl VSR {
 
     async fn prepare_op(self: Arc<Self>, op: &Message) {
         self.clone().prepare_op_no_increment(op).await;
-        self.op_number.fetch_add(1, Ordering::SeqCst);
+        let existing_op_number = self.op_number.fetch_add(1, Ordering::SeqCst);
+        tracing::debug!(
+            "incremented my op_number from {existing_op_number} while preparing {:?}",
+            op
+        );
     }
 
     async fn prepare_op_no_increment(self: Arc<Self>, op: &Message) {
@@ -660,7 +664,11 @@ impl VSR {
 
     async fn commit_op(self: Arc<Self>, op: &Message) {
         self.clone().commit_op_no_increment(op).await;
-        self.commit_number.fetch_add(1, Ordering::SeqCst);
+        let existing_commit_number = self.commit_number.fetch_add(1, Ordering::SeqCst);
+        tracing::debug!(
+            "incremented my commit_number from {existing_commit_number} while committing {:?}",
+            op
+        );
     }
 
     async fn commit_op_no_increment(self: Arc<Self>, op: &Message) {
@@ -710,8 +718,16 @@ impl VSR {
                         self.clone().commit_op(op).await;
                     }
 
-                    assert_eq!(self.op_number.load(Ordering::SeqCst), op_number);
-                    assert_eq!(self.commit_number.load(Ordering::SeqCst), commit_number);
+                    assert_eq!(
+                        self.op_number.load(Ordering::SeqCst),
+                        op_number,
+                        "catch up: operation numbers must match after catching up"
+                    );
+                    assert_eq!(
+                        self.commit_number.load(Ordering::SeqCst),
+                        commit_number,
+                        "catch up: commit numbers must match after catching up"
+                    );
                     break;
                 }
                 Err(_) => continue,
