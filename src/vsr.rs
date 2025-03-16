@@ -40,6 +40,11 @@ enum NodeStatus {
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
 
+struct PrepareOkAccumulator {
+    accumulated_msgs: Vec<Message>,
+    op_is_committed: bool,
+}
+
 pub struct VSR {
     op_log: Mutex<Vec<Message>>,
     op_number: AtomicUsize,
@@ -56,6 +61,7 @@ pub struct VSR {
     last_normal_status_view_number: AtomicUsize,
     start_view_change_accumulator: AtomicUsize,
     do_view_change_accumulator: Mutex<Vec<Message>>,
+    prepare_ok_tracker: Mutex<HashMap<usize, PrepareOkAccumulator>>, // k: op_number. v: Vec<PrepareOk msgs>
 }
 
 impl VSR {
@@ -76,6 +82,7 @@ impl VSR {
             last_normal_status_view_number: AtomicUsize::default(),
             start_view_change_accumulator: AtomicUsize::default(),
             do_view_change_accumulator: Mutex::new(Vec::new()),
+            prepare_ok_tracker: Default::default(),
         }
     }
 
@@ -339,6 +346,75 @@ impl VSR {
                         None,
                     )
                     .await;
+            }
+            Body::PrepareOk {
+                view_number,
+                op_number,
+            } => {
+                let f = self.majority_count() - 1;
+                let mut op_is_ready_to_commit = false;
+                {
+                    let mut tracker_guard = self.prepare_ok_tracker.lock().unwrap();
+                    tracker_guard
+                        .entry(op_number)
+                        .and_modify(
+                            |PrepareOkAccumulator {
+                                 ref mut accumulated_msgs,
+                                 op_is_committed,
+                             }| {
+                                if *op_is_committed {
+                                    // This PrepareOk msg can be safely discarded since it arrived after quorum
+                                    // was achieved.
+                                    // TODO this is a memory leak though. Maybe add periodic clean up.
+                                    return;
+                                }
+                                accumulated_msgs.push(msg.clone());
+                                if accumulated_msgs.len() >= f {
+                                    op_is_ready_to_commit = true;
+                                }
+                            },
+                        )
+                        .or_insert(PrepareOkAccumulator {
+                            accumulated_msgs: vec![msg.clone()],
+                            op_is_committed: false,
+                        });
+                }
+
+                // If f nodes have prepared this op, we consider this op (and all earlier
+                // non-committed ops) ready to commit.
+                if op_is_ready_to_commit {
+                    let ops_to_commit = &self.op_log.lock().unwrap().clone()
+                        [self.commit_number.load(Ordering::SeqCst)..=op_number];
+                    for op in ops_to_commit {
+                        self.clone().commit_op(&op).await;
+
+                        // mark op as committed in our tracker, so that we ignore any
+                        // remaining PrepareOk msgs for this op.
+                        self.prepare_ok_tracker
+                            .lock()
+                            .unwrap()
+                            .entry(op_number)
+                            .and_modify(
+                                |PrepareOkAccumulator {
+                                     ref mut op_is_committed,
+                                     ..
+                                 }| {
+                                    *op_is_committed = true;
+                                },
+                            );
+
+                        let response = self
+                            .client_table
+                            .lock()
+                            .unwrap()
+                            .get(&op.src)
+                            .unwrap() // entry exists, due to commit_op()
+                            .clone()
+                            .response_body
+                            .unwrap(); // entry exists, due to commit_op()
+                        self.node.clone().send(op.src.clone(), response, None).await;
+                    }
+                }
             }
             Body::Commit {
                 view_number,
@@ -661,59 +737,15 @@ impl VSR {
         //                    m: msg from client
         //                    n: op number assigned to this request
         //                    k: commit number
-        let replica_count = self.configuration.lock().unwrap().len() - 1;
         let body = Body::Prepare {
             view_number: self.view_number.load(Ordering::SeqCst),
             op: Box::new(msg.clone()),
             op_number: self.op_number.load(Ordering::SeqCst),
             commit_number: self.commit_number.load(Ordering::SeqCst),
         };
-
         self.node.clone().broadcast(body, None).await;
 
         self.reset_commit_msg_deadline_notifier.notify_one();
-
-        // We count ourselves as part of the consensus majority
-        let mut remaining_response_count = self.majority_count() - 1;
-
-        while let Some(response) = rx.recv().await {
-            tracing::debug!("remaining_response_count: {remaining_response_count}");
-            match response.body.inner {
-                Body::PrepareOk { .. } => {
-                    remaining_response_count -= 1;
-
-                    // TODO - check if this is needed ( step 5, normal operation )
-                    // Then, after it has executed all earlier operations
-                    // (those assigned smaller op-numbers)
-
-                    if remaining_response_count == 0 {
-                        break;
-                    }
-                }
-                _ => panic!(
-                    "expected a PrepareOk response to Prepare broadcast msg. Got: {:?}",
-                    response
-                ),
-            }
-        }
-
-        // TODO refactor to use commit_op()
-        // TODO this needs to be applied to this op and all earlier ones since
-        //      commit_number.
-        self.commit_number.fetch_add(1, Ordering::SeqCst);
-        let response_body = self.clone().apply_to_state_machine(&msg).await;
-        self.client_table.lock().unwrap().insert(
-            msg.src.clone(),
-            ClientTableEntry {
-                request_number: msg.body.msg_id,
-                response_body: Some(response_body.clone()),
-            },
-        );
-
-        self.node
-            .clone()
-            .send(msg.src.clone(), response_body, None)
-            .await;
     }
 
     async fn apply_to_state_machine(self: Arc<Self>, msg: &Message) -> Body {
