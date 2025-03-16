@@ -55,8 +55,7 @@ pub enum Body {
         commit_number: usize,
     },
     PrepareOk {
-        in_reply_to: usize,
-        view_numer: usize,
+        view_number: usize,
         op_number: usize,
     },
     Proxy {
@@ -106,7 +105,6 @@ impl Body {
             Body::ReadOk { in_reply_to, .. }
             | Body::WriteOk { in_reply_to, .. }
             | Body::CasOk { in_reply_to, .. }
-            | Body::PrepareOk { in_reply_to, .. }
             | Body::NewState { in_reply_to, .. }
             | Body::Error { in_reply_to, .. } => Some(*in_reply_to),
             Body::Init { .. }
@@ -120,7 +118,8 @@ impl Body {
             | Body::StartViewChange { .. }
             | Body::DoViewChange { .. }
             | Body::StartView { .. }
-            | Body::Prepare { .. } => None,
+            | Body::Prepare { .. }
+            | Body::PrepareOk { .. } => None,
         }
     }
     pub fn set_in_reply_to(&mut self, new_in_reply_to: usize) {
@@ -141,10 +140,6 @@ impl Body {
                 ref mut in_reply_to,
                 ..
             }
-            | Body::PrepareOk {
-                ref mut in_reply_to,
-                ..
-            }
             | Body::NewState {
                 ref mut in_reply_to,
                 ..
@@ -160,6 +155,7 @@ impl Body {
             | Body::Write { .. }
             | Body::Cas { .. }
             | Body::Prepare { .. }
+            | Body::PrepareOk { .. }
             | Body::Commit { .. }
             | Body::GetState { .. }
             | Body::StartViewChange { .. }

@@ -333,8 +333,7 @@ impl VSR {
                     .send(
                         msg.src,
                         Body::PrepareOk {
-                            in_reply_to: msg.body.msg_id,
-                            view_numer: self.view_number.load(Ordering::SeqCst),
+                            view_number: self.view_number.load(Ordering::SeqCst),
                             op_number: self.op_number.load(Ordering::SeqCst),
                         },
                         None,
@@ -670,8 +669,7 @@ impl VSR {
             commit_number: self.commit_number.load(Ordering::SeqCst),
         };
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(replica_count);
-        self.node.clone().broadcast(body, Some(tx)).await;
+        self.node.clone().broadcast(body, None).await;
 
         self.reset_commit_msg_deadline_notifier.notify_one();
 
