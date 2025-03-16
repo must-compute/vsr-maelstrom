@@ -384,7 +384,11 @@ impl VSR {
                 // non-committed ops) ready to commit.
                 if op_is_ready_to_commit {
                     let ops_to_commit = &self.op_log.lock().unwrap().clone()
-                        [self.commit_number.load(Ordering::SeqCst)..op_number];
+                        [self.commit_number.load(Ordering::SeqCst)..op_number]
+                        .iter()
+                        .skip(1) // because we slice starting at the latest commit
+                        .cloned()
+                        .collect::<Vec<_>>();
                     for op in ops_to_commit {
                         self.clone().commit_op(&op).await;
 
