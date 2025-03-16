@@ -90,7 +90,7 @@ impl VSR {
         let mut rx = self.node.clone().run().await;
 
         let commit_msg_deadline_duration = Duration::from_millis(100);
-        let view_change_deadline_duration = commit_msg_deadline_duration * 2;
+        let view_change_deadline_duration = commit_msg_deadline_duration * 10;
 
         let mut commit_msg_deadline = tokio::time::interval_at(
             Instant::now() + commit_msg_deadline_duration,
