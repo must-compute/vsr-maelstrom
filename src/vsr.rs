@@ -384,7 +384,7 @@ impl VSR {
                 // non-committed ops) ready to commit.
                 if op_is_ready_to_commit {
                     let ops_to_commit = &self.op_log.lock().unwrap().clone()
-                        [self.commit_number.load(Ordering::SeqCst)..=op_number];
+                        [self.commit_number.load(Ordering::SeqCst)..op_number];
                     for op in ops_to_commit {
                         self.clone().commit_op(&op).await;
 
