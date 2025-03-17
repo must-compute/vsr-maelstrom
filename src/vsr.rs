@@ -40,9 +40,9 @@ enum NodeStatus {
 pub type StateMachineKey = usize;
 pub type StateMachineValue = usize;
 
-struct PrepareOkAccumulator {
+struct MsgAccumulator {
     accumulated_msgs: Vec<Message>,
-    op_is_committed: bool,
+    is_done_processing: bool,
 }
 
 pub struct VSR {
@@ -59,9 +59,9 @@ pub struct VSR {
     reset_commit_msg_deadline_notifier: Notify,
     reset_view_change_deadline_notifier: Notify,
     last_normal_status_view_number: AtomicUsize,
-    start_view_change_accumulator: AtomicUsize,
-    do_view_change_accumulator: Mutex<Vec<Message>>,
-    prepare_ok_tracker: Mutex<HashMap<usize, PrepareOkAccumulator>>, // k: op_number. v: Vec<PrepareOk msgs>
+    prepare_ok_tracker: Mutex<HashMap<usize, MsgAccumulator>>, // k: op_number
+    start_view_change_tracker: Mutex<HashMap<usize, MsgAccumulator>>, // k: view_number
+    do_view_change_tracker: Mutex<HashMap<usize, MsgAccumulator>>, // k: view_number
 }
 
 impl VSR {
@@ -80,9 +80,9 @@ impl VSR {
             reset_commit_msg_deadline_notifier: Notify::new(),
             reset_view_change_deadline_notifier: Notify::new(),
             last_normal_status_view_number: AtomicUsize::default(),
-            start_view_change_accumulator: AtomicUsize::default(),
-            do_view_change_accumulator: Mutex::new(Vec::new()),
             prepare_ok_tracker: Default::default(),
+            start_view_change_tracker: Default::default(),
+            do_view_change_tracker: Default::default(),
         }
     }
 
@@ -330,7 +330,13 @@ impl VSR {
                 view_number,
                 ..
             } => {
-                if view_number >= self.view_number.load(Ordering::SeqCst) {
+                if *self.status.lock().unwrap() != NodeStatus::Normal {
+                    tracing::debug!("ignoring Prepare msg because I am not in Normal status.");
+                    return Ok(());
+                }
+
+                let my_view_number = self.view_number.load(Ordering::SeqCst);
+                if view_number >= my_view_number {
                     self.reset_view_change_deadline_notifier.notify_one();
                 }
 
@@ -363,11 +369,11 @@ impl VSR {
                     tracker_guard
                         .entry(op_number)
                         .and_modify(
-                            |PrepareOkAccumulator {
+                            |MsgAccumulator {
                                  ref mut accumulated_msgs,
-                                 op_is_committed,
+                                 is_done_processing,
                              }| {
-                                if *op_is_committed {
+                                if *is_done_processing {
                                     // This PrepareOk msg can be safely discarded since it arrived after quorum
                                     // was achieved.
                                     // TODO this is a memory leak though. Maybe add periodic clean up.
@@ -379,19 +385,21 @@ impl VSR {
                                 }
                             },
                         )
-                        .or_insert(PrepareOkAccumulator {
+                        .or_insert(MsgAccumulator {
                             accumulated_msgs: vec![msg.clone()],
-                            op_is_committed: false,
+                            is_done_processing: false,
                         });
                 }
 
                 // If f nodes have prepared this op, we consider this op (and all earlier
                 // non-committed ops) ready to commit.
                 if op_is_ready_to_commit {
+                    let my_commit_number = self.commit_number.load(Ordering::SeqCst);
+                    let skip_size = if my_commit_number == 0 { 0 } else { 1 };
                     let ops_to_commit = &self.op_log.lock().unwrap().clone()
-                        [self.commit_number.load(Ordering::SeqCst)..op_number]
+                        [my_commit_number..op_number]
                         .iter()
-                        .skip(1) // because we slice starting at the latest commit
+                        .skip(skip_size)
                         .cloned()
                         .collect::<Vec<_>>();
                     for op in ops_to_commit {
@@ -404,11 +412,11 @@ impl VSR {
                             .unwrap()
                             .entry(op_number)
                             .and_modify(
-                                |PrepareOkAccumulator {
-                                     ref mut op_is_committed,
+                                |MsgAccumulator {
+                                     ref mut is_done_processing,
                                      ..
                                  }| {
-                                    *op_is_committed = true;
+                                    *is_done_processing = true;
                                 },
                             );
 
@@ -461,7 +469,6 @@ impl VSR {
 
                 let missing_log_suffix = self.op_log.lock().unwrap()[op_number..]
                     .iter()
-                    .skip(1) // i.e. do not include the op matching the requester's op_number
                     .cloned()
                     .collect::<Vec<_>>();
 
@@ -479,23 +486,21 @@ impl VSR {
                 let my_view_number = self.view_number.load(Ordering::SeqCst);
                 let should_ignore = view_number < my_view_number;
                 if should_ignore {
+                    tracing::debug!("ignoring StartViewChange message because the incoming view_number: {view_number} is lower than my view number {my_view_number}");
                     return Ok(());
                 }
 
                 if view_number > my_view_number {
-                    // TODO switch to view change mode
+                    tracing::debug!("sending StartViewChange message because the incoming view_number: {view_number} is higher than my view number {my_view_number}");
+                    self.reset_view_change_deadline_notifier.notify_one();
                     self.view_number.store(view_number, Ordering::SeqCst);
-
-                    {
-                        let status_guard = self.status.lock().unwrap();
-                        match *status_guard {
-                            NodeStatus::Normal => {
-                                self.switch_node_status_to(NodeStatus::ViewChange)
-                            }
-                            NodeStatus::ViewChange => (),
-                            NodeStatus::Recovering => return Ok(()), // TODO are we sure?                    }
-                        }
+                    let my_status = self.status.lock().unwrap().clone();
+                    match my_status {
+                        NodeStatus::Normal => self.switch_node_status_to(NodeStatus::ViewChange),
+                        NodeStatus::ViewChange => (),
+                        NodeStatus::Recovering => return Ok(()), // TODO are we sure?                    }
                     }
+                    tracing::debug!("UNLOCKED");
 
                     self.node
                         .clone()
@@ -507,22 +512,55 @@ impl VSR {
                         )
                         .await;
 
+                    tracing::debug!("DONE BROADCASTING SVC [in response to receiving a SVC with view_number higher than mine]");
                     return Ok(());
                 }
 
                 // At this stage, we conclude that view_number == my_view_number.
-                assert_eq!(*self.status.lock().unwrap(), NodeStatus::ViewChange);
+                // assert_eq!(*self.status.lock().unwrap(), NodeStatus::ViewChange);
 
-                // TODO check if we got f StartViewChange msgs
-
-                self.start_view_change_accumulator
-                    .fetch_add(1, Ordering::SeqCst);
-
-                //We count ourselves as already accumulated
-                if self.start_view_change_accumulator.load(Ordering::SeqCst)
-                    >= self.majority_count() - 1
+                let f = self.majority_count() - 1;
+                let mut can_send_do_view_change = false;
                 {
-                    // self.reset_view_change_deadline_notifier.notify_one();
+                    let mut tracker_guard = self.start_view_change_tracker.lock().unwrap();
+                    tracker_guard
+                        .entry(view_number)
+                        .and_modify(
+                            |MsgAccumulator {
+                                 ref mut accumulated_msgs,
+                                 is_done_processing,
+                             }| {
+                                if *is_done_processing {
+                                    // TODO Maybe add periodic clean up.
+                                    return;
+                                }
+                                accumulated_msgs.push(msg.clone());
+                                if accumulated_msgs.len() >= f {
+                                    can_send_do_view_change = true;
+                                }
+                            },
+                        )
+                        .or_insert(MsgAccumulator {
+                            accumulated_msgs: vec![msg.clone()],
+                            is_done_processing: false,
+                        });
+                }
+
+                if can_send_do_view_change {
+                    self.prepare_ok_tracker
+                        .lock()
+                        .unwrap()
+                        .entry(view_number)
+                        .and_modify(
+                            |MsgAccumulator {
+                                 ref mut is_done_processing,
+                                 ..
+                             }| {
+                                *is_done_processing = true;
+                            },
+                        );
+
+                    self.reset_view_change_deadline_notifier.notify_one();
 
                     let primary = self.primary_node_at_view_number(view_number);
 
@@ -550,16 +588,76 @@ impl VSR {
                 match status {
                     NodeStatus::Recovering => return Ok(()),
                     NodeStatus::Normal | NodeStatus::ViewChange => {
+                        if latest_view_number > self.view_number.load(Ordering::SeqCst) {
+                            tracing::debug!(
+                                "initiating StartViewChange because: received DoViewChange with a view_number: {latest_view_number}, higher than my view number: {:?}",
+                                self.view_number.load(Ordering::SeqCst));
+                            self.view_number.store(latest_view_number, Ordering::SeqCst);
+                            self.switch_node_status_to(NodeStatus::ViewChange);
+                            self.node
+                                .clone()
+                                .broadcast(
+                                    Body::StartViewChange {
+                                        view_number: self.view_number.load(Ordering::SeqCst),
+                                    },
+                                    None,
+                                )
+                                .await;
+                            return Ok(());
+                        }
+
+                        let mut can_start_view = false;
                         {
-                            let mut do_view_change_accumulator =
-                                self.do_view_change_accumulator.lock().unwrap();
-                            do_view_change_accumulator.push(msg);
-                            if do_view_change_accumulator.len() < self.majority_count() {
-                                return Ok(());
-                            }
+                            let mut tracker_guard = self.do_view_change_tracker.lock().unwrap();
+                            tracker_guard
+                                .entry(latest_view_number)
+                                .and_modify(
+                                    |MsgAccumulator {
+                                         ref mut accumulated_msgs,
+                                         is_done_processing,
+                                     }| {
+                                        if *is_done_processing {
+                                            // TODO Maybe add periodic clean up.
+                                            return;
+                                        }
+                                        accumulated_msgs.push(msg.clone());
+                                        if accumulated_msgs.len() >= self.majority_count() {
+                                            tracing::debug!("can start view now, because majority count is {:?}", self.majority_count());
+                                            can_start_view = true;
+                                        }
+                                    },
+                                )
+                                .or_insert(MsgAccumulator {
+                                    accumulated_msgs: vec![msg.clone()],
+                                    is_done_processing: false,
+                                });
+                        }
+
+                        if can_start_view {
+                            self.prepare_ok_tracker
+                                .lock()
+                                .unwrap()
+                                .entry(latest_view_number)
+                                .and_modify(
+                                    |MsgAccumulator {
+                                         ref mut is_done_processing,
+                                         ..
+                                     }| {
+                                        *is_done_processing = true;
+                                    },
+                                );
+
+                            let msgs = self
+                                .do_view_change_tracker
+                                .lock()
+                                .unwrap()
+                                .get(&latest_view_number)
+                                .unwrap()
+                                .accumulated_msgs
+                                .clone();
 
                             let all_do_view_change_msgs_have_identical_view_numbers =
-                                do_view_change_accumulator.iter().all(|msg| {
+                                msgs.iter().all(|msg| {
                                     let Body::DoViewChange { view_number, .. } = msg.body.inner
                                     else {
                                         unreachable!()
@@ -571,7 +669,7 @@ impl VSR {
                             self.view_number.store(latest_view_number, Ordering::SeqCst);
 
                             // We need to choose the latest log.
-                            let mut logs_to_choose_from = do_view_change_accumulator
+                            let mut logs_to_choose_from = msgs
                                 .iter()
                                 .map(|msg| {
                                     let Body::DoViewChange {
@@ -600,7 +698,7 @@ impl VSR {
                             let latest_op_number = latest_log.len();
                             self.op_number.store(latest_op_number, Ordering::SeqCst);
 
-                            let latest_commit_number = do_view_change_accumulator
+                            let latest_commit_number = msgs
                                 .iter()
                                 .map(|msg| {
                                     let Body::DoViewChange { commit_number, .. } = msg.body.inner
@@ -634,9 +732,12 @@ impl VSR {
                         //      might be ok with potentially receiving the same reply more than once
                         //      but I'm not sure yet. Skipping this tiny step for now.
                         let op_log = self.op_log.lock().unwrap().clone();
-                        for op in &op_log[existing_commit_number..=updated_commit_number] {
-                            self.clone().prepare_op_no_increment(op).await;
-                            self.clone().commit_op_no_increment(op).await;
+                        // TODO the slice below can crash if updated_commit_number is greater than the op_log len
+                        if updated_commit_number != 0 {
+                            for op in &op_log[existing_commit_number..=updated_commit_number] {
+                                self.clone().prepare_op_no_increment(op).await;
+                                self.clone().commit_op_no_increment(op).await;
+                            }
                         }
 
                         // At this point, there _might_ be some ops in the operation log that haven't been commited.
@@ -645,6 +746,71 @@ impl VSR {
                         // in order (as usual for PrepareOk).
                     }
                 }
+            }
+            Body::StartView {
+                view_number,
+                log,
+                op_number,
+                commit_number,
+            } => {
+                *self.op_log.lock().unwrap() = log.clone();
+                let existing_op_number = self.op_number.swap(op_number, Ordering::SeqCst);
+                self.view_number.store(view_number, Ordering::SeqCst);
+                self.switch_node_status_to(NodeStatus::Normal);
+                // TODO here the paper says "...and update the information in their client table"
+                //      I'm not sure what info to update so far. Here, we will update the client
+                //      table upon comitting any ops that need to be committed (see below).
+                //      Note that the paper suggests updating the client table before comitting,
+                //      and I'm not sure why that is.
+                let missing_from_client_table = &log[existing_op_number..op_number]
+                    .iter()
+                    .collect::<Vec<_>>();
+
+                for missing_op in missing_from_client_table {
+                    self.client_table.lock().unwrap().insert(
+                        missing_op.src.clone(),
+                        ClientTableEntry {
+                            request_number: missing_op.body.msg_id,
+                            response_body: None,
+                        },
+                    );
+                }
+
+                let skip_size = if commit_number == 0 { 0 } else { 1 };
+                let uncommitted_ops = &log[commit_number..op_number]
+                    .iter()
+                    .skip(skip_size)
+                    .collect::<Vec<_>>();
+
+                let uncommitted_ops_exist = uncommitted_ops.len() > 0;
+                if uncommitted_ops_exist {
+                    let body = Body::PrepareOk {
+                        view_number,
+                        op_number,
+                    };
+
+                    self.node
+                        .clone()
+                        .send(self.current_primary_node(), body, None)
+                        .await;
+                }
+
+                let existing_commit_number = self.commit_number.load(Ordering::SeqCst);
+                let skip_size = if existing_commit_number == 0 { 0 } else { 1 };
+                let ops_to_commit = &log[existing_commit_number..commit_number]
+                    .iter()
+                    .skip(skip_size)
+                    .collect::<Vec<_>>();
+
+                for op in ops_to_commit {
+                    self.clone().commit_op(&op).await;
+                }
+
+                assert_eq!(
+                    self.commit_number.load(Ordering::SeqCst),
+                    commit_number,
+                    "applied DoViewChange but my commit_number (left) failed to match the Primary commit_number"
+                );
             }
             _ => {
                 todo!()
