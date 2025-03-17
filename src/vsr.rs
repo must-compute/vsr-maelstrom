@@ -710,9 +710,9 @@ impl VSR {
                                 })
                                 .collect::<Vec<(_, _, _)>>();
                             logs_to_choose_from
-                                .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                                .sort_by(|b, a| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
                             // we sorted by descending order, so we take the last log in the sorted logs.
-                            let (_, _, latest_log) = logs_to_choose_from.last().unwrap();
+                            let (_, _, latest_log) = logs_to_choose_from.first().unwrap();
                             *self.op_log.lock().unwrap() = latest_log.to_vec();
 
                             let latest_op_number = latest_log.len();
