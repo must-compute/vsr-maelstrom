@@ -547,9 +547,14 @@ impl VSR {
                                 }
                             },
                         )
-                        .or_insert(MsgAccumulator {
-                            accumulated_msgs: vec![msg.clone()],
-                            is_done_processing: false,
+                        .or_insert_with(|| {
+                            if 1 >= f {
+                                can_send_do_view_change = true;
+                            }
+                            MsgAccumulator {
+                                accumulated_msgs: vec![msg.clone()],
+                                is_done_processing: false,
+                            }
                         });
                 }
 
@@ -636,10 +641,15 @@ impl VSR {
                                         }
                                     },
                                 )
-                                .or_insert(MsgAccumulator {
+                                .or_insert_with(||{
+                                    if 1 >= self.majority_count() {
+                                        tracing::debug!("can start view now, because majority count is {:?}", self.majority_count());
+                                        can_start_view = true;
+                                    }
+                                    MsgAccumulator {
                                     accumulated_msgs: vec![msg.clone()],
                                     is_done_processing: false,
-                                });
+                                }});
                         }
 
                         if can_start_view {
