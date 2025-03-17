@@ -155,15 +155,16 @@ impl VSR {
             return;
         }
 
-        //we are the leader, no need to change view
-        if *my_id.unwrap() == self.current_primary_node() {
+        // We are the leader, no need to change view
+        if *my_id.unwrap() == self.current_primary_node()
+            && *self.status.lock().unwrap() == NodeStatus::Normal
+        {
             return;
         }
 
         //happy path
         tracing::debug!("view change deadline elapsed. Initiating view change protocol");
 
-        //TODO Record last normal
         self.view_number.fetch_add(1, Ordering::SeqCst);
         self.switch_node_status_to(NodeStatus::ViewChange);
 
@@ -243,6 +244,10 @@ impl VSR {
                 }
             }
             Body::Write { .. } | Body::Read { .. } | Body::Cas { .. } => {
+                if *self.status.lock().unwrap() != NodeStatus::Normal {
+                    tracing::debug!("ignoring write/read/cas because I am not a Primary that is within Normal Protocol");
+                    return Ok(());
+                }
                 let my_id = self.node.my_id.get().cloned().unwrap();
                 let leader_id = self.current_primary_node();
                 if my_id != leader_id {
@@ -424,6 +429,11 @@ impl VSR {
                 view_number,
                 commit_number,
             } => {
+                if *self.status.lock().unwrap() != NodeStatus::Normal {
+                    tracing::debug!("ignoring Commit msg because I am not in Normal status.");
+                    return Ok(());
+                }
+
                 if view_number >= self.view_number.load(Ordering::SeqCst) {
                     self.reset_view_change_deadline_notifier.notify_one();
                 }
@@ -685,6 +695,7 @@ impl VSR {
     }
 
     async fn catch_up(self: Arc<Self>) {
+        assert_eq!(*self.status.lock().unwrap(), NodeStatus::Normal);
         loop {
             let random_peer = self.node.get_random_peer();
             let (tx, rx) = tokio::sync::oneshot::channel();
