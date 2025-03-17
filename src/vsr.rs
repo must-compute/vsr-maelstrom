@@ -362,6 +362,7 @@ impl VSR {
                 view_number,
                 op_number,
             } => {
+                assert_eq!(view_number, self.view_number.load(Ordering::SeqCst));
                 let f = self.majority_count() - 1;
                 let mut op_is_ready_to_commit = false;
                 {
@@ -385,9 +386,14 @@ impl VSR {
                                 }
                             },
                         )
-                        .or_insert(MsgAccumulator {
-                            accumulated_msgs: vec![msg.clone()],
-                            is_done_processing: false,
+                        .or_insert_with(|| {
+                            if 1 >= f {
+                                op_is_ready_to_commit = true;
+                            }
+                            MsgAccumulator {
+                                accumulated_msgs: vec![msg.clone()],
+                                is_done_processing: false,
+                            }
                         });
                 }
 
