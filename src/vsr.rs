@@ -810,7 +810,7 @@ impl VSR {
 
                 let existing_commit_number = self.commit_number.load(Ordering::SeqCst);
                 if commit_number != 0 && commit_number != existing_commit_number {
-                    let ops_to_commit = &log[existing_commit_number..=commit_number]
+                    let ops_to_commit = &log[existing_commit_number..commit_number]
                         .iter()
                         .collect::<Vec<_>>();
 
