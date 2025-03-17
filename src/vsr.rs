@@ -607,6 +607,8 @@ impl VSR {
                             return Ok(());
                         }
 
+                        // TODO after here, return early if I'm not the candidate.
+                        // TODO any other checks to make sure the do view change is addressing me.
                         let mut can_start_view = false;
                         {
                             let mut tracker_guard = self.do_view_change_tracker.lock().unwrap();
@@ -690,10 +692,10 @@ impl VSR {
                                     )
                                 })
                                 .collect::<Vec<(_, _, _)>>();
-                            logs_to_choose_from.sort_by(|v_prime, n| {
-                                v_prime.0.cmp(&n.0).then_with(|| v_prime.1.cmp(&n.1))
-                            });
-                            let (_, _, latest_log) = logs_to_choose_from.first().unwrap();
+                            logs_to_choose_from
+                                .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                            // we sorted by descending order, so we take the last log in the sorted logs.
+                            let (_, _, latest_log) = logs_to_choose_from.last().unwrap();
                             *self.op_log.lock().unwrap() = latest_log.to_vec();
 
                             let latest_op_number = latest_log.len();
@@ -858,12 +860,16 @@ impl VSR {
     async fn catch_up(self: Arc<Self>) {
         assert_eq!(*self.status.lock().unwrap(), NodeStatus::Normal);
         loop {
-            let random_peer = self.node.get_random_peer();
+            let mut random_peer_replica = self.node.get_random_peer();
+            while random_peer_replica == self.current_primary_node() {
+                random_peer_replica = self.node.get_random_peer();
+            }
+
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.node
                 .clone()
                 .send(
-                    random_peer,
+                    random_peer_replica,
                     Body::GetState {
                         view_number: self.view_number.load(Ordering::SeqCst),
                         op_number: self.op_number.load(Ordering::SeqCst),
