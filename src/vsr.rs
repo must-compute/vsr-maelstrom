@@ -772,75 +772,53 @@ impl VSR {
                 op_number,
                 commit_number,
             } => {
-                // my prev log: op1 op2 op9
-                //                   ^
-                //
-                // new log:     op1 op2 op3 op4 op5 op6
-                //                                   ^
+                self.reset_view_change_deadline_notifier.notify_one();
 
-                // TODO
-                // ASSERT NEW_LOG HAS ALL ITEMS UNTIL OUR COMMIT NUMBER IN OUR OLD LOG.
-                // 1. remove all uncommitted ops FROM OLD LOG from client table
-                // 2. slice from old commit number till end of new log
-                //    prepare each of those ops, insert to client table
-                //    commit a subset of those ops (only if within new commit number)
-                //
-                // 2-better:
-                //           start at old commit num: prep until new op number (committing along the way until new commit num)
-
-                *self.op_log.lock().unwrap() = log.clone();
-                let existing_op_number = self.op_number.swap(op_number, Ordering::SeqCst);
+                assert!(view_number >= self.view_number.load(Ordering::SeqCst));
                 self.view_number.store(view_number, Ordering::SeqCst);
-                self.switch_node_status_to(NodeStatus::Normal);
-                // TODO here the paper says "...and update the information in their client table"
-                //      I'm not sure what info to update so far. Here, we will update the client
-                //      table upon comitting any ops that need to be committed (see below).
-                //      Note that the paper suggests updating the client table before comitting,
-                //      and I'm not sure why that is.
-                let missing_from_client_table =
-                    &log[existing_op_number..].iter().collect::<Vec<_>>();
 
-                for missing_op in missing_from_client_table {
-                    self.client_table.lock().unwrap().insert(
-                        missing_op.src.clone(),
-                        ClientTableEntry {
-                            request_number: missing_op.body.msg_id,
-                            response_body: None,
-                        },
-                    );
+                let old_log = self.op_log.lock().unwrap().clone();
+                let my_commit_number = self.commit_number.load(Ordering::SeqCst);
+
+                if !old_log.is_empty() {
+                    assert!(my_commit_number <= commit_number);
+                    let my_committed_ops = &old_log[0..my_commit_number];
+                    let remote_ops_until_my_commit_number = &log[0..my_commit_number];
+                    assert_eq!(my_committed_ops, remote_ops_until_my_commit_number);
                 }
 
-                let uncommitted_ops = &log[commit_number..].iter().collect::<Vec<_>>();
+                // 1. remove all uncommitted ops from old log
+                *self.op_log.lock().unwrap() = old_log[0..my_commit_number].to_vec();
 
-                let uncommitted_ops_exist = uncommitted_ops.len() > 0;
-                if uncommitted_ops_exist {
-                    let body = Body::PrepareOk {
-                        view_number,
-                        op_number,
-                    };
+                let mut remaining_op_count_for_comitting = commit_number - my_commit_number;
 
-                    self.node
-                        .clone()
-                        .send(self.current_primary_node(), body, None)
-                        .await;
-                }
-
-                let existing_commit_number = self.commit_number.load(Ordering::SeqCst);
-                if commit_number != 0 && commit_number != existing_commit_number {
-                    let ops_to_commit = &log[existing_commit_number..commit_number]
-                        .iter()
-                        .collect::<Vec<_>>();
-
-                    for op in ops_to_commit {
-                        self.clone().commit_op(&op).await;
+                // 2. slice from old commit number till end of new log
+                for op in &log[my_commit_number..] {
+                    // prepare each of those ops, insert to client table
+                    self.clone().prepare_op(op).await;
+                    // commit only if within new commit number
+                    if remaining_op_count_for_comitting > 0 {
+                        self.clone().commit_op(op).await;
+                        remaining_op_count_for_comitting -= 1;
                     }
                 }
 
+                assert_eq!(self.op_number.load(Ordering::SeqCst), op_number, "applied StartView but my op_number (left) failed to match the Primary op_number");
                 assert_eq!(
                     self.commit_number.load(Ordering::SeqCst),
                     commit_number,
                     "applied StartView but my commit_number (left) failed to match the Primary commit_number"
                 );
+
+                if op_number > commit_number {
+                    let body = Body::PrepareOk {
+                        view_number,
+                        op_number,
+                    };
+                    self.node.clone().send(msg.src, body, None).await;
+                }
+
+                self.switch_node_status_to(NodeStatus::Normal);
             }
             _ => {
                 todo!()
@@ -849,6 +827,7 @@ impl VSR {
         Ok(())
     }
 
+    //TODO remove async
     async fn prepare_op(self: Arc<Self>, op: &Message) {
         self.clone().prepare_op_no_increment(op).await;
         let existing_op_number = self.op_number.fetch_add(1, Ordering::SeqCst);
