@@ -395,13 +395,11 @@ impl VSR {
                 // non-committed ops) ready to commit.
                 if op_is_ready_to_commit {
                     let my_commit_number = self.commit_number.load(Ordering::SeqCst);
-                    let skip_size = if my_commit_number == 0 { 0 } else { 1 };
-                    let ops_to_commit = &self.op_log.lock().unwrap().clone()
-                        [my_commit_number..op_number]
+                    let ops_to_commit = &self.op_log.lock().unwrap().clone()[my_commit_number..]
                         .iter()
-                        .skip(skip_size)
                         .cloned()
                         .collect::<Vec<_>>();
+
                     for op in ops_to_commit {
                         self.clone().commit_op(&op).await;
 
@@ -732,7 +730,6 @@ impl VSR {
                         //      might be ok with potentially receiving the same reply more than once
                         //      but I'm not sure yet. Skipping this tiny step for now.
                         let op_log = self.op_log.lock().unwrap().clone();
-                        // TODO the slice below can crash if updated_commit_number is greater than the op_log len
                         if updated_commit_number != 0 {
                             for op in &op_log[existing_commit_number..=updated_commit_number] {
                                 self.clone().prepare_op_no_increment(op).await;
@@ -762,9 +759,8 @@ impl VSR {
                 //      table upon comitting any ops that need to be committed (see below).
                 //      Note that the paper suggests updating the client table before comitting,
                 //      and I'm not sure why that is.
-                let missing_from_client_table = &log[existing_op_number..op_number]
-                    .iter()
-                    .collect::<Vec<_>>();
+                let missing_from_client_table =
+                    &log[existing_op_number..].iter().collect::<Vec<_>>();
 
                 for missing_op in missing_from_client_table {
                     self.client_table.lock().unwrap().insert(
@@ -776,11 +772,7 @@ impl VSR {
                     );
                 }
 
-                let skip_size = if commit_number == 0 { 0 } else { 1 };
-                let uncommitted_ops = &log[commit_number..op_number]
-                    .iter()
-                    .skip(skip_size)
-                    .collect::<Vec<_>>();
+                let uncommitted_ops = &log[commit_number..].iter().collect::<Vec<_>>();
 
                 let uncommitted_ops_exist = uncommitted_ops.len() > 0;
                 if uncommitted_ops_exist {
@@ -796,20 +788,20 @@ impl VSR {
                 }
 
                 let existing_commit_number = self.commit_number.load(Ordering::SeqCst);
-                let skip_size = if existing_commit_number == 0 { 0 } else { 1 };
-                let ops_to_commit = &log[existing_commit_number..commit_number]
-                    .iter()
-                    .skip(skip_size)
-                    .collect::<Vec<_>>();
+                if commit_number != 0 && commit_number != existing_commit_number {
+                    let ops_to_commit = &log[existing_commit_number..=commit_number]
+                        .iter()
+                        .collect::<Vec<_>>();
 
-                for op in ops_to_commit {
-                    self.clone().commit_op(&op).await;
+                    for op in ops_to_commit {
+                        self.clone().commit_op(&op).await;
+                    }
                 }
 
                 assert_eq!(
                     self.commit_number.load(Ordering::SeqCst),
                     commit_number,
-                    "applied DoViewChange but my commit_number (left) failed to match the Primary commit_number"
+                    "applied StartView but my commit_number (left) failed to match the Primary commit_number"
                 );
             }
             _ => {
