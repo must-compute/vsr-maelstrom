@@ -458,8 +458,11 @@ impl VSR {
                 view_number,
                 op_number,
             } => {
+                // GetState should only be processed in Normal mode at the same view number (for now)
+                // and only by a replica.
                 let should_ignore = *self.status.lock().unwrap() != NodeStatus::Normal
-                    || self.view_number.load(Ordering::SeqCst) != view_number;
+                    || self.view_number.load(Ordering::SeqCst) != view_number
+                    || *self.node.my_id.get().unwrap() == self.current_primary_node();
                 if should_ignore {
                     tracing::debug!("Ignoring GetState request");
                     return Ok(());
