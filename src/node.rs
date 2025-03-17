@@ -145,7 +145,7 @@ impl Node {
                     serde_json::to_string(&msg)
                         .expect("msg being sent to STDOUT should be serializable to JSON")
                 );
-                tracing::debug!("sent msg {:?}", &msg);
+                tracing::debug!("📤 sent {:?}", &msg);
 
                 if let Some(responder) = responder {
                     self.unacked
@@ -170,7 +170,7 @@ impl Node {
 
                 let json_msg: Message = serde_json::from_str(&input)
                     .expect(&format!("should take a JSON message. Got {:?}", input));
-                tracing::debug!("received json msg: {:?}", json_msg);
+                tracing::debug!("📦 recv {:?}", json_msg);
 
                 if let Body::Init {
                     node_id, node_ids, ..
