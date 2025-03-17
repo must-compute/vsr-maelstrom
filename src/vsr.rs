@@ -474,6 +474,7 @@ impl VSR {
                     return Ok(());
                 }
 
+                assert!(op_number < self.op_number.load(Ordering::SeqCst));
                 let missing_log_suffix = self.op_log.lock().unwrap()[op_number..]
                     .iter()
                     .cloned()
@@ -771,6 +772,22 @@ impl VSR {
                 op_number,
                 commit_number,
             } => {
+                // my prev log: op1 op2 op9
+                //                   ^
+                //
+                // new log:     op1 op2 op3 op4 op5 op6
+                //                                   ^
+
+                // TODO
+                // ASSERT NEW_LOG HAS ALL ITEMS UNTIL OUR COMMIT NUMBER IN OUR OLD LOG.
+                // 1. remove all uncommitted ops FROM OLD LOG from client table
+                // 2. slice from old commit number till end of new log
+                //    prepare each of those ops, insert to client table
+                //    commit a subset of those ops (only if within new commit number)
+                //
+                // 2-better:
+                //           start at old commit num: prep until new op number (committing along the way until new commit num)
+
                 *self.op_log.lock().unwrap() = log.clone();
                 let existing_op_number = self.op_number.swap(op_number, Ordering::SeqCst);
                 self.view_number.store(view_number, Ordering::SeqCst);
@@ -908,10 +925,17 @@ impl VSR {
                         panic!("should receive a NewState as a response to GetState");
                     };
 
-                    //TODO fix? (there might be an off-by one error in some case)
+                    assert!(view_number >= self.view_number.load(Ordering::SeqCst));
+
+                    let mut remaining_op_count_for_comitting =
+                        commit_number - self.commit_number.load(Ordering::SeqCst);
+
                     for op in &missing_log_suffix {
                         self.clone().prepare_op(op).await;
-                        self.clone().commit_op(op).await;
+                        if remaining_op_count_for_comitting > 0 {
+                            self.clone().commit_op(op).await;
+                            remaining_op_count_for_comitting -= 1;
+                        }
                     }
 
                     assert_eq!(
