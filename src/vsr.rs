@@ -115,7 +115,7 @@ impl VSR {
                     // We infer that init is done via my_id being Some.
                     if let Some(my_id) = self.node.my_id.get() {
                         let leader_id = self.current_primary_node();
-                        if *my_id == leader_id{
+                        if *my_id == leader_id && *self.status.lock().unwrap() == NodeStatus::Normal {
                             self.clone().broadcast_commit_msg().await;
                         }
                     }
