@@ -9,10 +9,9 @@ use vsr::VSR;
 #[tokio::main]
 async fn main() {
     let subscriber = tracing_subscriber::fmt()
-        .with_file(false)
+        .with_file(true)
         .with_line_number(true)
         .with_target(true)
-        .without_time()
         .with_level(false)
         .with_writer(std::io::stderr)
         .with_thread_ids(true)
