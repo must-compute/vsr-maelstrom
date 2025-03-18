@@ -468,13 +468,13 @@ impl VSR {
                 // and only by a replica.
                 let should_ignore = *self.status.lock().unwrap() != NodeStatus::Normal
                     || self.view_number.load(Ordering::SeqCst) != view_number
-                    || *self.node.my_id.get().unwrap() == self.current_primary_node();
+                    || *self.node.my_id.get().unwrap() == self.current_primary_node()
+                    || op_number >= self.op_number.load(Ordering::SeqCst);
                 if should_ignore {
                     tracing::debug!("Ignoring GetState request");
                     return Ok(());
                 }
 
-                assert!(op_number < self.op_number.load(Ordering::SeqCst));
                 let missing_log_suffix = self.op_log.lock().unwrap()[op_number..]
                     .iter()
                     .cloned()
@@ -643,10 +643,6 @@ impl VSR {
                                     },
                                 )
                                 .or_insert_with(||{
-                                    if 1 >= self.majority_count() {
-                                        tracing::debug!("can start view now, because majority count is {:?}", self.majority_count());
-                                        can_start_view = true;
-                                    }
                                     MsgAccumulator {
                                     accumulated_msgs: vec![msg.clone()],
                                     is_done_processing: false,
@@ -711,7 +707,6 @@ impl VSR {
                                 .collect::<Vec<(_, _, _)>>();
                             logs_to_choose_from
                                 .sort_by(|b, a| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-                            // we sorted by descending order, so we take the last log in the sorted logs.
                             let (_, _, latest_log) = logs_to_choose_from.first().unwrap();
                             *self.op_log.lock().unwrap() = latest_log.to_vec();
 
@@ -872,10 +867,7 @@ impl VSR {
     async fn catch_up(self: Arc<Self>) {
         assert_eq!(*self.status.lock().unwrap(), NodeStatus::Normal);
         loop {
-            let mut random_peer_replica = self.node.get_random_peer();
-            while random_peer_replica == self.current_primary_node() {
-                random_peer_replica = self.node.get_random_peer();
-            }
+            let random_peer_replica = self.node.get_random_peer();
 
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.node
@@ -905,6 +897,7 @@ impl VSR {
                     };
 
                     assert!(view_number >= self.view_number.load(Ordering::SeqCst));
+                    assert!(op_number > self.op_number.load(Ordering::SeqCst));
 
                     let mut remaining_op_count_for_comitting =
                         commit_number - self.commit_number.load(Ordering::SeqCst);
