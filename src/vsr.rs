@@ -748,7 +748,7 @@ impl VSR {
                         //      but I'm not sure yet. Skipping this tiny step for now.
                         let op_log = self.op_log.lock().unwrap().clone();
                         if updated_commit_number != 0 {
-                            for op in &op_log[existing_commit_number..=updated_commit_number] {
+                            for op in &op_log[existing_commit_number..updated_commit_number] {
                                 self.clone().prepare_op_no_increment(op).await;
                                 self.clone().commit_op_no_increment(op).await;
                             }
