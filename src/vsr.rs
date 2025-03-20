@@ -786,37 +786,51 @@ impl VSR {
                 let old_log = self.op_log.lock().unwrap().clone();
                 let my_commit_number = self.commit_number.load(Ordering::SeqCst);
 
-                if !old_log.is_empty() {
-                    assert!(my_commit_number <= commit_number);
-                    let my_committed_ops = &old_log[0..my_commit_number];
-                    let remote_ops_until_my_commit_number = &log[0..my_commit_number];
-                    assert_eq!(my_committed_ops, remote_ops_until_my_commit_number);
-                }
+                if my_commit_number <= commit_number {
+                    if !old_log.is_empty() {
+                        assert!(my_commit_number <= commit_number);
+                        let my_committed_ops = &old_log[0..my_commit_number];
+                        let remote_ops_until_my_commit_number = &log[0..my_commit_number];
+                        assert_eq!(my_committed_ops, remote_ops_until_my_commit_number);
+                    }
 
-                // 1. remove all uncommitted ops from old log
-                *self.op_log.lock().unwrap() = old_log[0..my_commit_number].to_vec();
+                    // 1. remove all uncommitted ops from old log
+                    {
+                        let mut log_guard = self.op_log.lock().unwrap();
+                        *log_guard = old_log[0..my_commit_number].to_vec();
+                        // the op_number will be restored when we prepare the ops in the next step.
+                        self.op_number.store(log_guard.len(), Ordering::SeqCst);
+                    }
 
-                let mut remaining_op_count_for_comitting = commit_number - my_commit_number;
+                    let mut remaining_op_count_for_comitting = commit_number - my_commit_number;
 
-                // 2. slice from old commit number till end of new log
-                for op in &log[my_commit_number..] {
-                    // prepare each of those ops, insert to client table
-                    self.clone().prepare_op(op).await;
-                    // commit only if within new commit number
-                    if remaining_op_count_for_comitting > 0 {
-                        self.clone().commit_op(op);
-                        remaining_op_count_for_comitting -= 1;
+                    // 2. slice from old commit number till end of new log
+                    for op in &log[my_commit_number..] {
+                        // prepare each of those ops, insert to client table
+                        self.clone().prepare_op(op).await;
+                        // commit only if within new commit number
+                        if remaining_op_count_for_comitting > 0 {
+                            self.clone().commit_op(op);
+                            remaining_op_count_for_comitting -= 1;
+                        }
+                    }
+
+                    assert_eq!(self.op_number.load(Ordering::SeqCst), op_number, "applied StartView but my op_number (left) failed to match the Primary op_number");
+                    assert_eq!(
+                        self.commit_number.load(Ordering::SeqCst),
+                        commit_number,
+                        "applied StartView but my commit_number (left) failed to match the Primary commit_number"
+                    );
+                    if op_number > commit_number {
+                        let body = Body::PrepareOk {
+                            view_number,
+                            op_number,
+                        };
+                        self.node.clone().send(msg.src.clone(), body, None).await;
                     }
                 }
 
-                assert_eq!(self.op_number.load(Ordering::SeqCst), op_number, "applied StartView but my op_number (left) failed to match the Primary op_number");
-                assert_eq!(
-                    self.commit_number.load(Ordering::SeqCst),
-                    commit_number,
-                    "applied StartView but my commit_number (left) failed to match the Primary commit_number"
-                );
-
-                if op_number > commit_number {
+                if op_number > my_commit_number {
                     let body = Body::PrepareOk {
                         view_number,
                         op_number,
