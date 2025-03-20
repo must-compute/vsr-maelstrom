@@ -407,7 +407,7 @@ impl VSR {
                         .collect::<Vec<_>>();
 
                     for op in ops_to_commit {
-                        self.clone().commit_op(&op).await;
+                        self.clone().commit_op(&op);
 
                         // mark op as committed in our tracker, so that we ignore any
                         // remaining PrepareOk msgs for this op.
@@ -456,7 +456,7 @@ impl VSR {
                         self.clone().catch_up().await;
                     } else {
                         let client_request = self.op_log.lock().unwrap().last().cloned().unwrap();
-                        self.commit_op(&client_request).await;
+                        self.commit_op(&client_request);
                     }
                 }
             }
@@ -750,7 +750,7 @@ impl VSR {
                         if updated_commit_number != 0 {
                             for op in &op_log[existing_commit_number..updated_commit_number] {
                                 self.clone().prepare_op_no_increment(op).await;
-                                self.clone().commit_op_no_increment(op).await;
+                                self.clone().commit_op_no_increment(op);
                             }
                         }
 
@@ -793,7 +793,7 @@ impl VSR {
                     self.clone().prepare_op(op).await;
                     // commit only if within new commit number
                     if remaining_op_count_for_comitting > 0 {
-                        self.clone().commit_op(op).await;
+                        self.clone().commit_op(op);
                         remaining_op_count_for_comitting -= 1;
                     }
                 }
@@ -844,8 +844,8 @@ impl VSR {
         );
     }
 
-    async fn commit_op(self: Arc<Self>, op: &Message) {
-        self.clone().commit_op_no_increment(op).await;
+    fn commit_op(self: Arc<Self>, op: &Message) {
+        self.clone().commit_op_no_increment(op);
         let existing_commit_number = self.commit_number.fetch_add(1, Ordering::SeqCst);
         tracing::debug!(
             "incremented my commit_number from {existing_commit_number} while committing {:?}",
@@ -853,8 +853,8 @@ impl VSR {
         );
     }
 
-    async fn commit_op_no_increment(self: Arc<Self>, op: &Message) {
-        let response_body = self.clone().apply_to_state_machine(op).await;
+    fn commit_op_no_increment(self: Arc<Self>, op: &Message) {
+        let response_body = self.clone().apply_to_state_machine(op);
         self.client_table.lock().unwrap().insert(
             op.src.clone(),
             ClientTableEntry {
@@ -905,7 +905,7 @@ impl VSR {
                     for op in &missing_log_suffix {
                         self.clone().prepare_op(op).await;
                         if remaining_op_count_for_comitting > 0 {
-                            self.clone().commit_op(op).await;
+                            self.clone().commit_op(op);
                             remaining_op_count_for_comitting -= 1;
                         }
                     }
@@ -956,7 +956,7 @@ impl VSR {
         self.reset_commit_msg_deadline_notifier.notify_one();
     }
 
-    async fn apply_to_state_machine(self: Arc<Self>, msg: &Message) -> Body {
+    fn apply_to_state_machine(self: Arc<Self>, msg: &Message) -> Body {
         match msg.body.inner {
             Body::Read { key } => {
                 let result = self.state_machine.lock().unwrap().read(&key).cloned();
