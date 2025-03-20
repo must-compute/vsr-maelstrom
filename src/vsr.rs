@@ -400,40 +400,51 @@ impl VSR {
                 // If f nodes have prepared this op, we consider this op (and all earlier
                 // non-committed ops) ready to commit.
                 if op_is_ready_to_commit {
-                    let my_commit_number = self.commit_number.load(Ordering::SeqCst);
-                    let ops_to_commit = &self.op_log.lock().unwrap().clone()[my_commit_number..]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>();
+                    let mut pending_response_bodies: Vec<(String, Body)> = Vec::new(); // (client id, Body)
+                    {
+                        let mut log_guard = self.op_log.lock().unwrap();
+                        let my_commit_number = self.commit_number.load(Ordering::SeqCst);
+                        let ops_to_commit = &log_guard[my_commit_number..]
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>();
 
-                    for op in ops_to_commit {
-                        self.clone().commit_op(&op);
+                        for op in ops_to_commit {
+                            self.clone().commit_op(&op);
 
-                        // mark op as committed in our tracker, so that we ignore any
-                        // remaining PrepareOk msgs for this op.
-                        self.prepare_ok_tracker
-                            .lock()
-                            .unwrap()
-                            .entry(op_number)
-                            .and_modify(
-                                |MsgAccumulator {
-                                     ref mut is_done_processing,
-                                     ..
-                                 }| {
-                                    *is_done_processing = true;
-                                },
-                            );
+                            // mark op as committed in our tracker, so that we ignore any
+                            // remaining PrepareOk msgs for this op.
+                            self.prepare_ok_tracker
+                                .lock()
+                                .unwrap()
+                                .entry(op_number)
+                                .and_modify(
+                                    |MsgAccumulator {
+                                         ref mut is_done_processing,
+                                         ..
+                                     }| {
+                                        *is_done_processing = true;
+                                    },
+                                );
 
-                        let response = self
-                            .client_table
-                            .lock()
-                            .unwrap()
-                            .get(&op.src)
-                            .unwrap() // entry exists, due to commit_op()
+                            let response_body = self
+                                .client_table
+                                .lock()
+                                .unwrap()
+                                .get(&op.src)
+                                .unwrap() // entry exists, due to commit_op()
+                                .clone()
+                                .response_body
+                                .unwrap(); // entry exists, due to commit_op()
+                            pending_response_bodies.push((op.src.clone(), response_body));
+                        }
+                    }
+
+                    for (destination, response_body) in pending_response_bodies {
+                        self.node
                             .clone()
-                            .response_body
-                            .unwrap(); // entry exists, due to commit_op()
-                        self.node.clone().send(op.src.clone(), response, None).await;
+                            .send(destination, response_body, None)
+                            .await;
                     }
                 }
             }
