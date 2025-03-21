@@ -765,9 +765,13 @@ impl VSR {
                 op_number,
                 commit_number,
             } => {
+                let my_view_number = self.view_number.load(Ordering::SeqCst);
+                if view_number < my_view_number {
+                    tracing::debug!("ignoring StarView: received StartView with a view_number {view_number}, which is older than mine: {my_view_number}.");
+                    return Ok(());
+                }
                 self.reset_view_change_deadline_notifier.notify_one();
 
-                assert!(view_number >= self.view_number.load(Ordering::SeqCst));
                 self.view_number.store(view_number, Ordering::SeqCst);
 
                 let old_log = self.op_log.lock().unwrap().clone();
