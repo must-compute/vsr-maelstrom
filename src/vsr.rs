@@ -344,7 +344,7 @@ impl VSR {
                     self.clone().catch_up().await;
                 }
 
-                self.clone().prepare_op(&op).await;
+                self.clone().prepare_op(&op);
 
                 self.node
                     .clone()
@@ -393,6 +393,7 @@ impl VSR {
                                 accumulated_msgs.push(msg.clone());
                                 if accumulated_msgs.len() >= f {
                                     op_is_ready_to_commit = true;
+                                    *is_done_processing = true;
                                 }
                             },
                         )
@@ -421,22 +422,6 @@ impl VSR {
 
                         for op in ops_to_commit {
                             self.clone().commit_op(&op);
-
-                            // mark op as committed in our tracker, so that we ignore any
-                            // remaining PrepareOk msgs for this op.
-                            self.prepare_ok_tracker
-                                .lock()
-                                .unwrap()
-                                .entry(op_number)
-                                .and_modify(
-                                    |MsgAccumulator {
-                                         ref mut is_done_processing,
-                                         ..
-                                     }| {
-                                        *is_done_processing = true;
-                                    },
-                                );
-
                             let response_body = self
                                 .client_table
                                 .lock()
@@ -576,6 +561,7 @@ impl VSR {
                                 accumulated_msgs.push(msg.clone());
                                 if accumulated_msgs.len() >= f {
                                     can_send_do_view_change = true;
+                                    *is_done_processing = true;
                                 }
                             },
                         )
@@ -667,6 +653,7 @@ impl VSR {
                                         if accumulated_msgs.len() >= self.majority_count() {
                                             tracing::debug!("can start view now, because majority count is {:?}", self.majority_count());
                                             can_start_view = true;
+                                            *is_done_processing = true;
                                         }
                                     },
                                 )
@@ -678,19 +665,6 @@ impl VSR {
                         }
 
                         if can_start_view {
-                            self.prepare_ok_tracker
-                                .lock()
-                                .unwrap()
-                                .entry(latest_view_number)
-                                .and_modify(
-                                    |MsgAccumulator {
-                                         ref mut is_done_processing,
-                                         ..
-                                     }| {
-                                        *is_done_processing = true;
-                                    },
-                                );
-
                             let msgs = self
                                 .do_view_change_tracker
                                 .lock()
@@ -775,9 +749,14 @@ impl VSR {
                         //      might be ok with potentially receiving the same reply more than once
                         //      but I'm not sure yet. Skipping this tiny step for now.
                         let op_log = self.op_log.lock().unwrap().clone();
-                        if updated_commit_number != 0 {
-                            for op in &op_log[existing_commit_number..updated_commit_number] {
-                                self.clone().prepare_op_no_increment(op).await;
+                        if updated_commit_number != 0
+                            // it is possible my own vote was not considered because i got a majority already.
+                            && existing_commit_number < updated_commit_number
+                        {
+                            for op in &op_log[existing_commit_number
+                                ..max(updated_commit_number, existing_commit_number)]
+                            {
+                                self.clone().prepare_op_no_increment(op);
                                 self.clone().commit_op_no_increment(op);
                             }
                         }
@@ -809,7 +788,6 @@ impl VSR {
 
                 if my_commit_number <= commit_number {
                     if !old_log.is_empty() {
-                        assert!(my_commit_number <= commit_number);
                         let my_committed_ops = &old_log[0..my_commit_number];
                         let remote_ops_until_my_commit_number = &log[0..my_commit_number];
                         assert_eq!(my_committed_ops, remote_ops_until_my_commit_number);
@@ -828,7 +806,7 @@ impl VSR {
                     // 2. slice from old commit number till end of new log
                     for op in &log[my_commit_number..] {
                         // prepare each of those ops, insert to client table
-                        self.clone().prepare_op(op).await;
+                        self.clone().prepare_op(op);
                         // commit only if within new commit number
                         if remaining_op_count_for_comitting > 0 {
                             self.clone().commit_op(op);
@@ -869,8 +847,8 @@ impl VSR {
     }
 
     //TODO remove async
-    async fn prepare_op(self: Arc<Self>, op: &Message) {
-        self.clone().prepare_op_no_increment(op).await;
+    fn prepare_op(self: Arc<Self>, op: &Message) {
+        self.clone().prepare_op_no_increment(op);
         let existing_op_number = self.op_number.fetch_add(1, Ordering::SeqCst);
         tracing::debug!(
             "incremented my op_number from {existing_op_number} while preparing {:?}",
@@ -878,7 +856,7 @@ impl VSR {
         );
     }
 
-    async fn prepare_op_no_increment(self: Arc<Self>, op: &Message) {
+    fn prepare_op_no_increment(self: Arc<Self>, op: &Message) {
         self.op_log.lock().unwrap().push(op.clone());
 
         self.client_table.lock().unwrap().insert(
@@ -952,7 +930,7 @@ impl VSR {
                         commit_number - self.commit_number.load(Ordering::SeqCst);
 
                     for op in &missing_log_suffix {
-                        self.clone().prepare_op(op).await;
+                        self.clone().prepare_op(op);
                         if remaining_op_count_for_comitting > 0 {
                             self.clone().commit_op(op);
                             remaining_op_count_for_comitting -= 1;
