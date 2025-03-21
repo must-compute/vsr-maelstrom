@@ -392,7 +392,7 @@ impl VSR {
                             }
                             MsgAccumulator {
                                 accumulated_msgs: vec![msg.clone()],
-                                is_done_processing: false,
+                                is_done_processing: op_is_ready_to_commit,
                             }
                         });
                 }
@@ -565,25 +565,12 @@ impl VSR {
                             }
                             MsgAccumulator {
                                 accumulated_msgs: vec![msg.clone()],
-                                is_done_processing: false,
+                                is_done_processing: can_send_do_view_change,
                             }
                         });
                 }
 
                 if can_send_do_view_change {
-                    self.prepare_ok_tracker
-                        .lock()
-                        .unwrap()
-                        .entry(view_number)
-                        .and_modify(
-                            |MsgAccumulator {
-                                 ref mut is_done_processing,
-                                 ..
-                             }| {
-                                *is_done_processing = true;
-                            },
-                        );
-
                     self.reset_view_change_deadline_notifier.notify_one();
 
                     let primary = self.primary_node_at_view_number(view_number);
@@ -922,7 +909,10 @@ impl VSR {
                     };
 
                     assert!(view_number >= self.view_number.load(Ordering::SeqCst));
-                    assert!(op_number > self.op_number.load(Ordering::SeqCst));
+                    if op_number <= self.op_number.load(Ordering::SeqCst) {
+                        tracing::debug!("received catch_up response with op_number less than or equal to mine. Retrying with a random peer");
+                        continue;
+                    }
 
                     let mut remaining_op_count_for_comitting =
                         commit_number - self.commit_number.load(Ordering::SeqCst);
