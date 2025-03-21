@@ -367,6 +367,16 @@ impl VSR {
                 let mut op_is_ready_to_commit = false;
                 {
                     let mut tracker_guard = self.prepare_ok_tracker.lock().unwrap();
+
+                    if let Some(MsgAccumulator {
+                        is_done_processing, ..
+                    }) = tracker_guard.get(&op_number)
+                    {
+                        if *is_done_processing {
+                            return Ok(());
+                        }
+                    }
+
                     tracker_guard
                         .entry(op_number)
                         .and_modify(
@@ -542,6 +552,16 @@ impl VSR {
                 let mut can_send_do_view_change = false;
                 {
                     let mut tracker_guard = self.start_view_change_tracker.lock().unwrap();
+
+                    if let Some(MsgAccumulator {
+                        is_done_processing, ..
+                    }) = tracker_guard.get(&view_number)
+                    {
+                        if *is_done_processing {
+                            return Ok(());
+                        }
+                    }
+
                     tracker_guard
                         .entry(view_number)
                         .and_modify(
@@ -622,6 +642,16 @@ impl VSR {
                         let mut can_start_view = false;
                         {
                             let mut tracker_guard = self.do_view_change_tracker.lock().unwrap();
+
+                            if let Some(MsgAccumulator {
+                                is_done_processing, ..
+                            }) = tracker_guard.get(&latest_view_number)
+                            {
+                                if *is_done_processing {
+                                    return Ok(());
+                                }
+                            }
+
                             tracker_guard
                                 .entry(latest_view_number)
                                 .and_modify(
