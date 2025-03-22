@@ -920,21 +920,22 @@ impl VSR {
                         panic!("should receive a NewState as a response to GetState");
                     };
 
+                    // TODO this assert should be a continue
                     assert!(view_number >= self.view_number.load(Ordering::SeqCst));
                     if op_number <= self.op_number.load(Ordering::SeqCst) {
                         tracing::debug!("received catch_up response with op_number less than or equal to mine. Retrying with a random peer");
                         continue;
                     }
 
-                    let mut remaining_op_count_for_comitting =
-                        commit_number - self.commit_number.load(Ordering::SeqCst);
-
                     for op in &missing_log_suffix {
                         self.clone().prepare_op(op);
-                        if remaining_op_count_for_comitting > 0 {
-                            self.clone().commit_op(op);
-                            remaining_op_count_for_comitting -= 1;
-                        }
+                    }
+
+                    let my_commit_number = self.commit_number.load(Ordering::SeqCst);
+                    let ops_to_commit =
+                        &self.op_log.lock().unwrap()[my_commit_number..commit_number];
+                    for op in ops_to_commit {
+                        self.clone().commit_op(op);
                     }
 
                     assert_eq!(
